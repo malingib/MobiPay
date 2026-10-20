@@ -36,7 +36,7 @@ function baseUrl() {
 }
 
 router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,next) => {
-  const tenantId = req.params.tenantId!;
+  const tenantId = String(req.params.tenantId ?? "");
   const parsed = stkSchema.safeParse(req.body);
   if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({ error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten() });
   try {
@@ -85,7 +85,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
 });
 
 router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,next) => {
-  const tenantId = req.params.tenantId!;
+  const tenantId = String(req.params.tenantId ?? "");
   const parsed = pesapalSchema.safeParse(req.body);
   if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten()});
   try {
@@ -113,7 +113,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
 });
 
 router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
-  const tenantId=req.params.tenantId!, token=req.params.token!, expected=process.env.DARAJA_CALLBACK_TOKEN;
+  const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? ""), expected=process.env.DARAJA_CALLBACK_TOKEN;
   if (!idSchema.safeParse(tenantId).success || !expected || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
   const callback=(req.body as any)?.Body?.stkCallback;
   if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
@@ -150,7 +150,7 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
 });
 
 router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
-  const tenantId=req.params.tenantId!;
+  const tenantId=String(req.params.tenantId ?? "");
   if (!idSchema.safeParse(tenantId).success) return res.status(404).send("Not found");
   const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
   if (!trackingId || trackingId.length>200) return res.status(400).send("Missing order tracking id");

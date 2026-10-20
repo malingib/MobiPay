@@ -1,0 +1,188 @@
+import { Router } from "express";
+import { timingSafeEqual } from "node:crypto";
+import { z } from "zod";
+import { getPool } from "./db.js";
+import { requireAuth } from "./auth.js";
+import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
+
+const router = Router();
+const idSchema = z.string().uuid();
+const stkSchema = z.object({
+  phone: z.string().regex(/^254[17][0-9]{8}$/),
+  amountMinor: z.number().int().positive().max(10_000_000).refine((n) => n % 100 === 0, "M-Pesa STK amount must be whole KES"),
+  merchantReference: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(100).default("MobiWave payment"),
+});
+const pesapalSchema = z.object({
+  amountMinor: z.number().int().positive().max(100_000_000),
+  merchantReference: z.string().trim().min(1).max(120),
+  description: z.string().trim().min(1).max(200),
+  email: z.string().email().optional(),
+  phone: z.string().trim().max(30).optional(),
+});
+
+async function getMembership(userId: string, tenantId: string) {
+  const r = await getPool().query("select role from public.payment_tenant_memberships where tenant_id=$1 and user_id=$2 and status='active'", [tenantId,userId]);
+  return r.rows[0] as { role: string } | undefined;
+}
+function tokenMatches(supplied: string, expected: string) {
+  const a = Buffer.from(supplied), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a,b);
+}
+function baseUrl() {
+  const base = process.env.PUBLIC_API_BASE_URL;
+  if (!base || !base.startsWith("https://")) throw new Error("PUBLIC_API_BASE_URL must be an HTTPS URL");
+  return base.replace(/\/$/, "");
+}
+
+router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,next) => {
+  const tenantId = req.params.tenantId!;
+  const parsed = stkSchema.safeParse(req.body);
+  if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({ error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten() });
+  try {
+    const member = await getMembership(req.authUser!.id,tenantId);
+    if (!member) return res.status(404).json({ error:"tenant_not_found" });
+    if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({ error:"insufficient_role" });
+    if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") return res.status(403).json({ error:"live_payments_disabled" });
+    const idempotencyKey = req.header("idempotency-key")?.trim();
+    if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error:"idempotency_key_required" });
+    const d = parsed.data;
+    const client = await getPool().connect();
+    let transaction: { id:string; provider_transaction_id:string|null; status:string } | undefined;
+    try {
+      await client.query("begin");
+      const inserted = await client.query(
+        "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,'daraja',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider_transaction_id,status",
+        [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.phone,d.description],
+      );
+      transaction = inserted.rows[0];
+      if (!transaction) {
+        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_transaction_id,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
+        const row = prior.rows[0];
+        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor) {
+          await client.query("rollback"); return res.status(409).json({error:"idempotency_conflict"});
+        }
+        await client.query("commit");
+        return res.status(200).json({transactionId:row.id,status:row.status,checkoutRequestId:row.provider_transaction_id,idempotentReplay:true});
+      }
+      await client.query("commit");
+    } catch (error) { await client.query("rollback").catch(()=>undefined); throw error; }
+    finally { client.release(); }
+
+    const callbackToken = process.env.DARAJA_CALLBACK_TOKEN;
+    if (!callbackToken) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
+    const callbackUrl = `${baseUrl()}/webhooks/daraja/${tenantId}/${callbackToken}`;
+    try {
+      const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description});
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
+      await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
+      return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
+    } catch {
+      await getPool().query("update public.payment_transactions set status='unknown',provider_status='initiation_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transaction.id,tenantId]);
+      return res.status(502).json({error:"provider_result_unknown",transactionId:transaction.id,message:"The provider outcome is uncertain. Check status before retrying with a new idempotency key."});
+    }
+  } catch(error) { return next(error); }
+});
+
+router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,next) => {
+  const tenantId = req.params.tenantId!;
+  const parsed = pesapalSchema.safeParse(req.body);
+  if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten()});
+  try {
+    const member = await getMembership(req.authUser!.id,tenantId);
+    if (!member) return res.status(404).json({error:"tenant_not_found"});
+    if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    if ((process.env.PESAPAL_ENV ?? "sandbox")!=="sandbox") return res.status(403).json({error:"live_payments_disabled"});
+    const key=req.header("idempotency-key")?.trim();
+    if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
+    const d=parsed.data;
+    const ins=await getPool().query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
+    if (!ins.rows[0]) return res.status(409).json({error:"idempotency_key_already_used"});
+    const transactionId=ins.rows[0].id as string;
+    try {
+      const callbackUrl=`${baseUrl()}/webhooks/pesapal/${tenantId}`;
+      const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone});
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,status='pending',provider_status='checkout_created',updated_at=now() where id=$2",[provider.orderTrackingId,transactionId]);
+      await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
+      return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
+    } catch {
+      await getPool().query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]);
+      return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Checkout outcome is uncertain; query provider status before retrying."});
+    }
+  } catch(error) { return next(error); }
+});
+
+router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
+  const tenantId=req.params.tenantId!, token=req.params.token!, expected=process.env.DARAJA_CALLBACK_TOKEN;
+  if (!idSchema.safeParse(tenantId).success || !expected || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
+  const callback=(req.body as any)?.Body?.stkCallback;
+  if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
+  try {
+    const tx=await getPool().query("select id,amount_minor,status from public.payment_transactions where tenant_id=$1 and provider='daraja' and provider_transaction_id=$2",[tenantId,callback.CheckoutRequestID]);
+    if (!tx.rows[0]) return res.status(200).json({ResultCode:0,ResultDesc:"Accepted for review"});
+    const row=tx.rows[0];
+    const eventId=callback.CheckoutRequestID;
+    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status) values($1,'daraja',$2,'stk_callback',$3,'received') on conflict do nothing returning id",[tenantId,eventId,sha256Payload(req.body)]);
+    if (!event.rows[0]) return res.status(200).json({ResultCode:0,ResultDesc:"Duplicate accepted"});
+    let verified=false;
+    let callbackAmount:number|undefined;
+    let receipt:string|undefined;
+    const items=callback.CallbackMetadata?.Item;
+    if (Array.isArray(items)) {
+      callbackAmount=Number(items.find((i:any)=>i.Name==="Amount")?.Value);
+      receipt=items.find((i:any)=>i.Name==="MpesaReceiptNumber")?.Value;
+    }
+    try {
+      const status=await queryDarajaStk(eventId);
+      verified=String(status.ResultCode)==="0" && callback.ResultCode===0 && callbackAmount!==undefined && callbackAmount*100===Number(row.amount_minor) && typeof receipt==="string" && receipt.length>0;
+    } catch { verified=false; }
+    if (verified) {
+      await getPool().query("update public.payment_transactions set status='succeeded',provider_status='status_query_verified',provider_transaction_id=$1,confirmed_at=now(),updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending','unknown')",[receipt,row.id,tenantId]);
+      await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
+      await getPool().query("insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,metadata) values($1,'daraja.callback.verified','transaction',$2,$3::jsonb)",[tenantId,row.id,JSON.stringify({receipt})]);
+    } else {
+      await getPool().query("update public.payment_transactions set status='unknown',provider_status='callback_received_unverified',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
+      await getPool().query("insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'daraja',$3,'status_mismatch',$4::jsonb)",[tenantId,row.id,eventId,JSON.stringify({reason:"Callback could not be independently verified; manual review required."})]);
+      await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
+    }
+    return res.status(200).json({ResultCode:0,ResultDesc:"Accepted"});
+  } catch(error) { return next(error); }
+});
+
+router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
+  const tenantId=req.params.tenantId!;
+  if (!idSchema.safeParse(tenantId).success) return res.status(404).send("Not found");
+  const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
+  if (!trackingId || trackingId.length>200) return res.status(400).send("Missing order tracking id");
+  try {
+    const tx=await getPool().query("select id,amount_minor,currency,status from public.payment_transactions where tenant_id=$1 and provider='pesapal' and provider_transaction_id=$2",[tenantId,trackingId]);
+    if (!tx.rows[0]) return res.status(200).send("Accepted for review");
+    const row=tx.rows[0];
+    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status) values($1,'pesapal',$2,'ipn_status_query',$3,'received') on conflict do nothing returning id",[tenantId,trackingId,sha256Payload({query:req.query})]);
+    if (!event.rows[0]) return res.status(200).send("Duplicate accepted");
+    try {
+      const status=await queryPesapalStatus(trackingId);
+      const code=Number(status.status_code);
+      const amount=Number(status.amount);
+      const currency=String(status.currency_code ?? status.currency ?? "");
+      const amountMatches=Number.isFinite(amount) && Math.round(amount*100)===Number(row.amount_minor) && currency.toUpperCase()==="KES";
+      if (code===1 && amountMatches) {
+        await getPool().query("update public.payment_transactions set status='succeeded',provider_status='pesapal_status_verified',confirmed_at=now(),updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending','unknown')",[row.id,tenantId]);
+        await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
+      } else if (code===2 && amountMatches) {
+        await getPool().query("update public.payment_transactions set status='failed',provider_status='pesapal_status_verified_failed',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending','unknown')",[row.id,tenantId]);
+        await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
+      } else {
+        await getPool().query("update public.payment_transactions set status='unknown',provider_status='pesapal_status_requires_review',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
+        await getPool().query("insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'pesapal',$3,'status_mismatch',$4::jsonb)",[tenantId,row.id,trackingId,JSON.stringify({reason:"Provider status or amount/currency could not be safely reconciled."})]);
+        await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
+      }
+    } catch {
+      await getPool().query("update public.payment_transactions set status='unknown',provider_status='pesapal_status_query_failed',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
+      await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
+    }
+    return res.status(200).send("Accepted");
+  } catch(error) { return next(error); }
+});
+
+export default router;

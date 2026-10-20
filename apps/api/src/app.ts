@@ -3,6 +3,7 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import paymentRoutes from "./paymentRoutes.js";
+import providerRoutes from "./providerRoutes.js";
 import { getPool } from "./db.js";
 
 export function createApp() {
@@ -37,6 +38,7 @@ export function createApp() {
   });
 
   app.use("/api/v1", paymentRoutes);
+  app.use("/api/v1", providerRoutes);
 
   app.get("/ready", async (_req, res) => {
     try {

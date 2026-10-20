@@ -71,7 +71,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
 
     const callbackToken = process.env.DARAJA_CALLBACK_TOKEN;
     if (!callbackToken) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
-    const callbackUrl = `${baseUrl()}/webhooks/daraja/${tenantId}/${callbackToken}`;
+    const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
       const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description});
       await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
@@ -100,7 +100,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     if (!ins.rows[0]) return res.status(409).json({error:"idempotency_key_already_used"});
     const transactionId=ins.rows[0].id as string;
     try {
-      const callbackUrl=`${baseUrl()}/webhooks/pesapal/${tenantId}`;
+      const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone});
       await getPool().query("update public.payment_transactions set provider_transaction_id=$1,status='pending',provider_status='checkout_created',updated_at=now() where id=$2",[provider.orderTrackingId,transactionId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);

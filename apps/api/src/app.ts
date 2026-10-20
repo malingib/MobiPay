@@ -37,8 +37,8 @@ export function createApp() {
     });
   });
 
-  app.use("/api/v1", paymentRoutes);
   app.use("/api/v1", providerRoutes);
+  app.use("/api/v1", paymentRoutes);
 
   app.get("/ready", async (_req, res) => {
     try {

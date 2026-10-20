@@ -58,6 +58,9 @@ export function createApp() {
     });
   });
 
+  app.use("/api/v1", providerRoutes);
+  app.use("/api/v1", paymentRoutes);
+
   app.use((_req, res) => {
     res.status(404).json({ error: "not_found", message: "The requested resource was not found." });
   });

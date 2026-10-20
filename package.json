@@ -1,0 +1,20 @@
+{
+  "name": "mobiwave-payments",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MobiWave Payments multi-tenant payments and reconciliation platform",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @mobiwave/api",
+    "dev:web": "npm run dev --workspace @mobiwave/web",
+    "build": "npm run build --workspace @mobiwave/api && npm run build --workspace @mobiwave/web",
+    "typecheck": "npm run typecheck --workspace @mobiwave/api && npm run typecheck --workspace @mobiwave/web",
+    "test": "npm run test --workspace @mobiwave/api"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,37 +1,41 @@
 # MobiWave Payments
 
-MobiWave Payments is a Kenya-focused, multi-tenant payment and reconciliation platform for MobiWave and external merchants.
+MobiWave Payments is a Kenya-focused multi-tenant payments visibility and reconciliation platform for MobiWave and external merchants.
 
-## Product direction
+## Current implementation
 
-The first release prioritizes payment visibility and reconciliation rather than holding customer funds or claiming to be a licensed payment service provider. Provider integrations are enabled only for merchant-owned accounts and approved credentials, subject to provider terms and Kenyan legal/regulatory review.
+- React/Vite sandbox console; its displayed metrics remain illustrative demo data.
+- TypeScript/Express API with helmet, CORS allowlist, request-size limits, rate limiting, health and database-readiness endpoints.
+- JWT verification through configured issuer, audience, and remote JWKS.
+- Neon PostgreSQL migration for tenants, memberships, provider account references, transactions, idempotency, provider events, reconciliation exceptions, and audit history.
+- Tenant membership and role checks for transaction APIs and exception resolution.
+- Transaction CSV exports with spreadsheet-formula injection protection.
+- Conservative reconciliation matching and exception classification.
+- Sandbox-only Daraja STK initiation and callback processing. Callback success is not accepted without a server-side STK status query and amount/receipt checks.
+- Sandbox-only Pesapal order submission and server-side status inquiry before marking transactions successful.
+- Live provider operations are explicitly disabled in the adapters.
 
-### Initial scope
+## Required server configuration
 
-- Tenant-isolated merchant workspaces and role-based access.
-- M-Pesa Daraja callback ingestion with signature/credential verification where supported, strict input validation, idempotency, and replay-safe processing.
-- Reconciliation of provider transactions against invoices or member references, with an exception queue and human-approved resolution.
-- Pesapal checkout/status adapter, where merchant onboarding and credentials permit it.
-- Bank/account-to-account options only through documented, authorized bank APIs or approved partners.
-- Append-only audit events, exportable reports, and operational monitoring.
+See `.env.example`. Configure real values only in deployment secret storage:
 
-## Security principles
+- `DATABASE_URL` — dedicated Neon PostgreSQL connection string.
+- `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration.
+- Daraja sandbox credentials and a long random `DARAJA_CALLBACK_TOKEN`.
+- Pesapal sandbox credentials and registered `PESAPAL_IPN_ID`.
+- `PUBLIC_API_BASE_URL` — public HTTPS API base URL used to construct provider callback URLs.
 
-- Never store raw card data, M-Pesa PINs, or provider secrets in source control.
-- Keep tenants isolated at every API and data-access boundary; derive tenant identity from authenticated server-side claims, not request body fields alone.
-- Treat provider callbacks as untrusted until verified and confirmed against the provider's status API where available.
-- Use idempotency keys, unique provider references, rate limits, strict schemas, and explicit transaction states.
-- Separate demo data from production data and never represent simulated payments as real transactions.
+## Important deployment blocker
 
-## Delivery status
+The connected Neon organization rejected project creation because it is managed by Vercel. No existing database was modified because the available Neon projects belong to other work or have not been identified as the dedicated MobiWave Payments database. Provision a dedicated database through the owning Vercel/Neon integration, then apply and test `neon/migrations/001_payment_foundation.sql` before deploying the API.
 
-This repository is being initialized. No live payment processing should be assumed until authentication, persistence, provider credentials, callback verification, reconciliation tests, deployment controls, and legal/provider approvals have been completed.
+## Production launch gates
 
-## Provider documentation
+- Apply migration and test tenant isolation against two separate users and tenants.
+- Configure real authentication and test token issuer/audience/JWKS behavior.
+- Verify Daraja and Pesapal sandbox flows end-to-end using actual provider-issued credentials and public HTTPS callbacks.
+- Test concurrent callbacks, idempotent retries, amount mismatches, and provider timeouts.
+- Add alerts, backups, restore tests, structured monitoring, and incident-response procedures.
+- Obtain provider and Kenyan legal/regulatory confirmation before live collection or fund movement.
 
-- Safaricom Daraja: https://developer.safaricom.co.ke/
-- Pesapal API: https://developer.pesapal.com/
-
-## Regulatory note
-
-This software is not legal advice. Before enabling payment collection, settlement, or fund movement, obtain Kenyan legal advice and written confirmation from relevant providers on the operating model and licensing requirements.
+The platform does not hold customer funds by design. Never store card data, M-Pesa PINs, bank passwords, or live provider secrets in source control.

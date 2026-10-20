@@ -2,6 +2,7 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import paymentRoutes from "./paymentRoutes.js";
 
 export function createApp() {
   const app = express();
@@ -33,6 +34,8 @@ export function createApp() {
       mode: process.env.NODE_ENV ?? "development",
     });
   });
+
+  app.use("/api/v1", paymentRoutes);
 
   app.get("/api/v1", (_req, res) => {
     res.status(200).json({

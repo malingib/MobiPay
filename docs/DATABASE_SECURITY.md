@@ -1,23 +1,32 @@
-# Persistence and authorization notes
+# Neon persistence and authorization
 
-The first Supabase migration is a **locked-down schema baseline**, not a deployed database. It creates tenant memberships, transactions, provider-event deduplication, reconciliation exceptions, and audit events.
+The canonical migration is `neon/migrations/001_payment_foundation.sql`. It is written for Neon PostgreSQL and does not depend on Supabase's `auth.users` schema.
 
-## Security posture
+## Implemented API boundary
 
-- RLS is enabled on every payment table.
-- Authenticated users receive read policies only for tenants where they have an active membership.
-- Financial writes intentionally have no authenticated-client RLS policies; implement writes through server-side handlers that verify the authenticated user, role, tenant, provider evidence, and state transition.
-- Provider event IDs and idempotency keys have unique constraints.
-- Transaction status is constrained to explicit lifecycle values; `unknown` is distinct from success and failure.
-- Audit events are designed for append-only use. Enforce append-only writes in the service layer and do not grant browser clients mutation privileges.
-- Tenant creation and first-owner provisioning must be performed by a trusted server-side onboarding workflow.
+- JWT verification uses a configured issuer, audience, and remote JWKS URL.
+- Tenant IDs from requests are treated as untrusted; every tenant API checks an active membership before reading or mutating data.
+- Roles are checked on transaction creation and exception resolution.
+- Transaction creation requires an idempotency key and rejects reuse with different payment details.
+- Payment rows, provider events, exceptions, and audit events persist in PostgreSQL.
+- CSV export is bounded and protects against spreadsheet formula injection.
+- RLS is enabled as a secondary guard; the backend's database role must remain server-only and must never be exposed to browsers.
 
-## Before applying to a real Supabase project
+## Required configuration
 
-1. Review this migration against the target project's existing schema and policies.
-2. Test RLS using at least two unrelated tenants and users.
-3. Add transactional server-side state transitions and immutable audit-write logic.
-4. Set retention and data-minimization rules for payer references and event metadata.
-5. Apply through a reviewed migration pipeline; do not paste service-role credentials into source control.
+- `DATABASE_URL`: Neon pooled or direct PostgreSQL connection string held in deployment secrets.
+- `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL`: issuer-specific JWT verification settings.
+- Configure provider secrets in server-side deployment settings only. Never commit them.
 
-No provider credentials, live payment API, or production database is configured by this migration.
+## Before production
+
+1. Apply this migration to the dedicated MobiWave Payments Neon project using a reviewed migration workflow.
+2. Test tenant isolation with two users and two unrelated tenants.
+3. Test membership revocation, suspended tenants, duplicate idempotency keys, and concurrent callbacks.
+4. Use a non-owner database role for the API where practical; validate RLS policies using that exact role.
+5. Add database-backed integration tests and backup/restore checks.
+6. Configure production secrets only after provider onboarding, callback URLs, and legal/provider approval.
+
+The current provider adapters are sandbox-only. Daraja callbacks are not treated as proof of payment unless a server-side STK status query and amount/receipt checks succeed. Pesapal status must be queried server-side; uncertain or mismatched results become `unknown` and are routed for review.
+
+**Operational limitation:** the connected Neon organization currently rejects project creation because it is managed by Vercel. No existing Neon project has been modified or used as a substitute, to avoid accidentally migrating an unrelated product database.

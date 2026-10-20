@@ -1,28 +1,27 @@
 # Delivery roadmap
 
-## Phase 0 — Foundation
-- Establish this dedicated repository and architecture.
-- Define API/web boundaries, configuration, lint/build/test commands, and secrets policy.
-- Keep demo mode visibly separate from production.
+## Implemented in repository
+- Dedicated monorepo, API/web scaffold, CI typecheck/build/test.
+- Neon-native schema migration for tenants, memberships, provider references, transactions, provider events, reconciliation exceptions, and audit events.
+- Configurable JWT/JWKS validation, server-side Neon connection pool, tenant membership/role checks.
+- Idempotent transaction API, exception-resolution API, CSV export, and readiness probe.
+- Deterministic reconciliation matcher with unit tests.
+- Sandbox-only Daraja STK initiation and callback status-query verification.
+- Sandbox-only Pesapal checkout and server-side transaction-status verification.
 
-## Phase 1 — Reconciliation MVP
-- Tenant auth and membership checks.
-- Import authorized M-Pesa statements/transaction exports and ingest Daraja C2B/STK callback events.
-- Transaction ledger, matching rules, exception review, audit trail, and CSV reports.
-- Idempotency and duplicate/replay tests.
+## Blocked on dedicated Neon provisioning
+- The connected Neon organization is managed by Vercel and the Neon project-creation action is rejected. Do not use another product's database as a substitute.
+- Apply `neon/migrations/001_payment_foundation.sql` to the dedicated MobiWave Payments database and verify the migration in that database.
+- Run two-tenant RLS/isolation integration tests using the deployed API's actual database role.
 
-## Phase 2 — Provider adapters
-- Daraja sandbox integration for merchant-owned credentials.
-- Pesapal order submission, IPN registration, server-side status verification, and refunds/status support only where officially supported.
-- Bank adapters only after access approval and documented integration contracts.
+## Remaining pre-production work
+- Configure the chosen identity provider and validate issuer/audience/JWKS settings against real signed tokens.
+- Supply actual Daraja and Pesapal sandbox credentials, public HTTPS callback URL, and registered IPN; execute end-to-end test transactions.
+- Add provider-specific event fixtures, timeout/retry tests, callback concurrency tests, and reconciliation batch persistence.
+- Add scheduled reconciliation against authorized statement/provider exports and operational alerting/backup restore tests.
+- Validate provider terms and Kenyan legal/regulatory classification before enabling live payments.
 
-## Phase 3 — Pilot and operational readiness
-- Pilot with a small set of merchants using their own Paybill/Till/provider accounts.
-- Measure match rate, time saved, exception rate, and support burden.
-- Review data protection obligations, retention, incident response, backups, and Kenyan regulatory classification with counsel and providers.
-
-## Out of scope until separately approved
-- Custody of merchant/customer funds or internal pooled balances.
-- Claiming licensed-PSP status without authorization.
-- Storing cardholder data or M-Pesa PINs.
+## Not enabled
+- Live provider operations (adapter code rejects production mode).
+- Custody of merchant/customer funds or pooled balances.
 - Unofficial bank integrations or credential collection.

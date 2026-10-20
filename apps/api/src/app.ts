@@ -2,6 +2,9 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import paymentRoutes from "./paymentRoutes.js";
+import providerRoutes from "./providerRoutes.js";
+import { getPool } from "./db.js";
 
 export function createApp() {
   const app = express();
@@ -34,6 +37,15 @@ export function createApp() {
     });
   });
 
+  app.get("/ready", async (_req, res) => {
+    try {
+      await getPool().query("select 1");
+      return res.status(200).json({ status: "ready", database: "connected" });
+    } catch {
+      return res.status(503).json({ status: "not_ready", database: "unavailable" });
+    }
+  });
+
   app.get("/api/v1", (_req, res) => {
     res.status(200).json({
       name: "MobiWave Payments API",
@@ -42,6 +54,10 @@ export function createApp() {
       livePaymentsEnabled: false,
     });
   });
+
+  // Public provider webhooks are registered first; business API routes require JWT auth.
+  app.use("/api/v1", providerRoutes);
+  app.use("/api/v1", paymentRoutes);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "not_found", message: "The requested resource was not found." });
@@ -58,7 +74,6 @@ export function createApp() {
     if (error?.code === "origin_not_allowed") {
       return res.status(403).json({ error: "origin_not_allowed", message: "This origin is not allowed." });
     }
-    // Never expose internal errors, credentials, or provider payloads to clients.
     return res.status(500).json({ error: "internal_server_error", message: "An unexpected error occurred." });
   });
 

@@ -3,6 +3,7 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import paymentRoutes from "./paymentRoutes.js";
+import { getPool } from "./db.js";
 
 export function createApp() {
   const app = express();
@@ -36,6 +37,15 @@ export function createApp() {
   });
 
   app.use("/api/v1", paymentRoutes);
+
+  app.get("/ready", async (_req, res) => {
+    try {
+      await getPool().query("select 1");
+      return res.status(200).json({ status: "ready", database: "connected" });
+    } catch {
+      return res.status(503).json({ status: "not_ready", database: "unavailable" });
+    }
+  });
 
   app.get("/api/v1", (_req, res) => {
     res.status(200).json({

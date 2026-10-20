@@ -37,9 +37,6 @@ export function createApp() {
     });
   });
 
-  app.use("/api/v1", providerRoutes);
-  app.use("/api/v1", paymentRoutes);
-
   app.get("/ready", async (_req, res) => {
     try {
       await getPool().query("select 1");
@@ -58,6 +55,7 @@ export function createApp() {
     });
   });
 
+  // Public provider webhooks are registered first; business API routes require JWT auth.
   app.use("/api/v1", providerRoutes);
   app.use("/api/v1", paymentRoutes);
 
@@ -76,7 +74,6 @@ export function createApp() {
     if (error?.code === "origin_not_allowed") {
       return res.status(403).json({ error: "origin_not_allowed", message: "This origin is not allowed." });
     }
-    // Never expose internal errors, credentials, or provider payloads to clients.
     return res.status(500).json({ error: "internal_server_error", message: "An unexpected error occurred." });
   });
 

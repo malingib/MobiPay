@@ -20,6 +20,7 @@ create unique index if not exists payment_transactions_pesapal_tracking_idx
   where provider = 'pesapal' and provider_order_tracking_id is not null;
 
 alter table public.payment_provider_events
+  add column if not exists payload jsonb not null default '{}'::jsonb,
   add column if not exists processing_attempts integer not null default 0 check (processing_attempts >= 0),
   add column if not exists last_error text,
   add column if not exists processing_started_at timestamptz;

@@ -146,35 +146,35 @@ for each row execute function public.enforce_payment_status_transition();
 -- Transactional outbox: enqueue a merchant event in the same database transaction
 -- that records the terminal payment state. Delivery is performed asynchronously.
 create or replace function public.enqueue_payment_merchant_webhooks()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql security definer set search_path = public as $
 declare
-  event_name text;
+  v_event_name text;
   endpoint record;
   stable_event_id text;
 begin
   if new.status = old.status then return new; end if;
   if new.status = 'succeeded' then
-    event_name := 'payment.succeeded';
+    v_event_name := 'payment.succeeded';
   elsif new.status = 'failed' then
-    event_name := 'payment.failed';
+    v_event_name := 'payment.failed';
   elsif new.status = 'cancelled' then
-    event_name := 'payment.cancelled';
+    v_event_name := 'payment.cancelled';
   else
     return new;
   end if;
 
   stable_event_id := new.id::text || '.' || new.status;
   for endpoint in
-    select id from public.payment_merchant_webhook_endpoints
-    where tenant_id = new.tenant_id and enabled = true and event_name = any(subscribed_events)
+    select e.id from public.payment_merchant_webhook_endpoints e
+    where e.tenant_id = new.tenant_id and e.enabled = true and v_event_name = any(e.subscribed_events)
   loop
     insert into public.payment_merchant_webhook_deliveries
       (tenant_id, endpoint_id, event_id, event_type, payload)
     values (
-      new.tenant_id, endpoint.id, stable_event_id, event_name,
+      new.tenant_id, endpoint.id, stable_event_id, v_event_name,
       jsonb_build_object(
         'id', stable_event_id,
-        'type', event_name,
+        'type', v_event_name,
         'createdAt', now(),
         'data', jsonb_build_object(
           'transactionId', new.id,

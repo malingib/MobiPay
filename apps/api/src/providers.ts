@@ -5,7 +5,8 @@ function required(name: string, credentials?: Record<string, string>) {
     DARAJA_CONSUMER_KEY: "consumerKey", DARAJA_CONSUMER_SECRET: "consumerSecret", DARAJA_SHORTCODE: "shortCode", DARAJA_PASSKEY: "passkey",
     PESAPAL_CONSUMER_KEY: "consumerKey", PESAPAL_CONSUMER_SECRET: "consumerSecret", PESAPAL_IPN_ID: "ipnId",
   };
-  const value = credentials?.[credentialFields[name] ?? ""] ?? process.env[name];
+  const credentialField = credentialFields[name];
+  const value = credentialField ? credentials?.[credentialField] : process.env[name];
   if (!value) throw new Error(`${name} is not configured`);
   return value;
 }

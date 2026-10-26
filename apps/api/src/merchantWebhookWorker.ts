@@ -21,7 +21,7 @@ function privateIp(address: string): boolean {
     normalized.startsWith("::ffff:10.") || normalized.startsWith("::ffff:192.168.");
 }
 
-async function assertSafeWebhookUrl(raw: string) {
+export async function assertSafeWebhookUrl(raw: string) {
   const url = new URL(raw);
   if (url.protocol !== "https:" || url.username || url.password || url.port && url.port !== "443") {
     throw new Error("Webhook URL must be a credential-free HTTPS URL on port 443");
@@ -59,14 +59,14 @@ export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promi
         `select d.id,d.endpoint_id,d.event_id,d.event_type,d.payload,d.attempts,e.url,e.signing_secret_reference
          from public.payment_merchant_webhook_deliveries d
          join public.payment_merchant_webhook_endpoints e on e.id=d.endpoint_id and e.enabled=true
-         where d.status in ('pending','retry') and d.next_attempt_at <= now()
+         where ((d.status in ('pending','retry') and d.next_attempt_at <= now()) or (d.status='delivering' and d.claimed_at < now()-interval '5 minutes'))
          order by d.next_attempt_at,d.created_at
-         for update of d skip locked limit 1`,
+         limit 1 for update of d skip locked`,
       );
       delivery = selected.rows[0];
       if (!delivery) { await client.query("commit"); break; }
       await client.query(
-        "update public.payment_merchant_webhook_deliveries set status='delivering',attempts=attempts+1,last_error=null where id=$1",
+        "update public.payment_merchant_webhook_deliveries set status='delivering',attempts=attempts+1,claimed_at=now(),updated_at=now(),last_error=null where id=$1",
         [delivery.id],
       );
       await client.query("commit");
@@ -98,7 +98,7 @@ export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promi
       });
       if (!response.ok) throw Object.assign(new Error(`Webhook endpoint returned HTTP ${response.status}`), { status: response.status });
       await getPool().query(
-        "update public.payment_merchant_webhook_deliveries set status='delivered',last_http_status=$2,delivered_at=now(),last_error=null where id=$1",
+        "update public.payment_merchant_webhook_deliveries set status='delivered',last_http_status=$2,delivered_at=now(),claimed_at=null,updated_at=now(),last_error=null where id=$1",
         [delivery.id,response.status],
       );
       counts.delivered++;
@@ -108,7 +108,7 @@ export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promi
       const dead = attempt >= MAX_ATTEMPTS;
       const delaySeconds = Math.min(21_600, 30 * (2 ** Math.min(attempt - 1, 10)));
       await getPool().query(
-        "update public.payment_merchant_webhook_deliveries set status=$2,last_http_status=$3,last_error=$4,next_attempt_at=now()+($5 * interval '1 second') where id=$1",
+        "update public.payment_merchant_webhook_deliveries set status=$2,last_http_status=$3,last_error=$4,claimed_at=null,updated_at=now(),next_attempt_at=now()+($5 * interval '1 second') where id=$1",
         [delivery.id,dead ? "dead_letter" : "retry",status,message,delaySeconds],
       );
       if (dead) counts.deadLettered++; else counts.retried++;

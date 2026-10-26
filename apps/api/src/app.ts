@@ -4,6 +4,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import paymentRoutes from "./paymentRoutes.js";
 import providerRoutes from "./providerRoutes.js";
+import providerConnectionRoutes from "./providerConnections.js";
 import { getPool } from "./db.js";
 
 export function createApp() {
@@ -16,6 +17,16 @@ export function createApp() {
   app.use(cors({
     origin(origin, callback) {
       if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      try {
+        const hostname = new URL(origin).hostname;
+        // Permit this project's Vercel preview hosts; API routes still require a valid JWT.
+        if (hostname === "mobipay-zeta.vercel.app" ||
+            (hostname.startsWith("mobipay-") && hostname.endsWith("-dwaynes-projects-c48061a4.vercel.app"))) {
+          return callback(null, true);
+        }
+      } catch {
+        // Invalid Origin is rejected below.
+      }
       const error = new Error("Origin not allowed");
       Object.assign(error, { status: 403, code: "origin_not_allowed" });
       return callback(error);
@@ -57,6 +68,7 @@ export function createApp() {
 
   // Public provider webhooks are registered first; business API routes require JWT auth.
   app.use("/api/v1", providerRoutes);
+  app.use("/api/v1", providerConnectionRoutes);
   app.use("/api/v1", paymentRoutes);
 
   app.use((_req, res) => {

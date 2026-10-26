@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { getPool } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { getTenantProviderCredentials } from "./providerConnections.js";
 import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
 
 const router = Router();
@@ -43,6 +44,9 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const member = await getMembership(req.authUser!.id,tenantId);
     if (!member) return res.status(404).json({ error:"tenant_not_found" });
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({ error:"insufficient_role" });
+    let providerCredentials: Record<string, string>;
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "daraja") as Record<string, string>; }
+    catch { return res.status(409).json({ error: "daraja_not_connected", message: "Connect and verify this merchant’s Daraja sandbox credentials first." }); }
     if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") return res.status(403).json({ error:"live_payments_disabled" });
     const idempotencyKey = req.header("idempotency-key")?.trim();
     if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error:"idempotency_key_required" });
@@ -73,7 +77,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     if (!callbackToken || callbackToken.length < 32) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
-      const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl});
+      const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl}, providerCredentials);
       await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_request_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
       return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
@@ -92,6 +96,9 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     const member = await getMembership(req.authUser!.id,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    let providerCredentials: Record<string, string>;
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "pesapal") as Record<string, string>; }
+    catch { return res.status(409).json({ error: "pesapal_not_connected", message: "Connect and verify this merchant’s Pesapal sandbox credentials first." }); }
     if ((process.env.PESAPAL_ENV ?? "sandbox")!=="sandbox") return res.status(403).json({error:"live_payments_disabled"});
     const key=req.header("idempotency-key")?.trim();
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
@@ -107,8 +114,8 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     const transactionId=ins.rows[0].id as string;
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
-      const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone});
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3",[provider.orderTrackingId,provider.redirectUrl,transactionId]);
+      const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone}, providerCredentials);
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4",[provider.orderTrackingId,provider.redirectUrl,transactionId,tenantId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {
@@ -142,7 +149,8 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
       receipt=items.find((i:any)=>i.Name==="MpesaReceiptNumber")?.Value;
     }
     try {
-      const status=await queryDarajaStk(eventId);
+      const credentials = await getTenantProviderCredentials(tenantId, "daraja") as Record<string, string>;
+      const status=await queryDarajaStk(eventId, credentials);
       verified=String(status.ResultCode)==="0" && callback.ResultCode===0 && callbackAmount!==undefined && callbackAmount*100===Number(row.amount_minor) && typeof receipt==="string" && receipt.length>0;
     } catch { verified=false; }
     if (verified) {
@@ -173,7 +181,8 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
     const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at) values($1,'pesapal',$2,'ipn_status_query',$3,$4::jsonb,'received',1,now()) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,processing_started_at=now(),last_error=null,payload=excluded.payload where payment_provider_events.processing_status='retry' returning id",[tenantId,trackingId,sha256Payload({query:req.query}),JSON.stringify({query:req.query})]);
     if (!event.rows[0]) return res.status(200).send("Duplicate accepted");
     try {
-      const status=await queryPesapalStatus(trackingId);
+      const credentials = await getTenantProviderCredentials(tenantId, "pesapal") as Record<string, string>;
+      const status=await queryPesapalStatus(trackingId, credentials);
       const code=Number(status.status_code);
       const amount=Number(status.amount);
       const currency=String(status.currency_code ?? status.currency ?? "");

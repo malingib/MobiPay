@@ -18,7 +18,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   const issuer = process.env.AUTH_ISSUER;
   const audience = process.env.AUTH_AUDIENCE;
   const jwksUri = process.env.AUTH_JWKS_URL;
-  if (!issuer || !audience || !jwksUri) {
+  if (!issuer || !jwksUri) {
     return res.status(503).json({ error: "authentication_not_configured" });
   }
   try {
@@ -26,7 +26,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       jwks = createRemoteJWKSet(new URL(jwksUri));
       jwksUrl = jwksUri;
     }
-    const { payload } = await jwtVerify(authorization.slice(7), jwks, { issuer, audience });
+    const { payload } = await jwtVerify(authorization.slice(7), jwks, { issuer, ...(audience ? { audience } : {}) });
     if (typeof payload.sub !== "string" || payload.sub.length < 1 || payload.sub.length > 256) {
       return res.status(401).json({ error: "invalid_identity" });
     }

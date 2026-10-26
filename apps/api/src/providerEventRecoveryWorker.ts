@@ -1,5 +1,6 @@
 import { getPool } from "./db.js";
 import { queryDarajaStk, queryPesapalStatus } from "./providers.js";
+import { getTenantProviderCredentials } from "./providerConnections.js";
 
 type RetryEvent = {
   id: string;
@@ -57,7 +58,8 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
         const items=callback?.CallbackMetadata?.Item;
         const amount=Array.isArray(items) ? Number(items.find((item:any)=>item.Name==="Amount")?.Value) : NaN;
         const receipt=Array.isArray(items) ? items.find((item:any)=>item.Name==="MpesaReceiptNumber")?.Value : undefined;
-        const status=await queryDarajaStk(event.provider_event_id);
+        const credentials = await getTenantProviderCredentials(event.tenant_id, "daraja") as Record<string, string>;
+        const status=await queryDarajaStk(event.provider_event_id, credentials);
         const verified=String(status.ResultCode)==="0" && callback?.ResultCode===0 &&
           Number.isFinite(amount) && amount*100===Number(event.amount_minor) &&
           typeof receipt==="string" && receipt.length>0;
@@ -75,7 +77,8 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
           counts.exceptions++;
         }
       } else {
-        const status=await queryPesapalStatus(event.provider_event_id);
+        const credentials = await getTenantProviderCredentials(event.tenant_id, "pesapal") as Record<string, string>;
+        const status=await queryPesapalStatus(event.provider_event_id, credentials);
         const code=Number(status.status_code);
         const amount=Number(status.amount);
         const currency=String(status.currency_code ?? status.currency ?? "").toUpperCase();

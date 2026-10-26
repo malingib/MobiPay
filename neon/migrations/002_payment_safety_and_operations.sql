@@ -141,3 +141,63 @@ drop trigger if exists payment_transaction_status_transition on public.payment_t
 create trigger payment_transaction_status_transition
 before update of status on public.payment_transactions
 for each row execute function public.enforce_payment_status_transition();
+
+
+-- Transactional outbox: enqueue a merchant event in the same database transaction
+-- that records the terminal payment state. Delivery is performed asynchronously.
+create or replace function public.enqueue_payment_merchant_webhooks()
+returns trigger language plpgsql as $$
+declare
+  event_name text;
+  endpoint record;
+  stable_event_id text;
+begin
+  if new.status = old.status then return new; end if;
+  if new.status = 'succeeded' then
+    event_name := 'payment.succeeded';
+  elsif new.status = 'failed' then
+    event_name := 'payment.failed';
+  elsif new.status = 'cancelled' then
+    event_name := 'payment.cancelled';
+  else
+    return new;
+  end if;
+
+  stable_event_id := new.id::text || '.' || new.status;
+  for endpoint in
+    select id from public.payment_merchant_webhook_endpoints
+    where tenant_id = new.tenant_id and enabled = true and event_name = any(subscribed_events)
+  loop
+    insert into public.payment_merchant_webhook_deliveries
+      (tenant_id, endpoint_id, event_id, event_type, payload)
+    values (
+      new.tenant_id, endpoint.id, stable_event_id, event_name,
+      jsonb_build_object(
+        'id', stable_event_id,
+        'type', event_name,
+        'createdAt', now(),
+        'data', jsonb_build_object(
+          'transactionId', new.id,
+          'merchantReference', new.merchant_reference,
+          'provider', new.provider,
+          'providerTransactionId', new.provider_transaction_id,
+          'providerCheckoutRequestId', new.provider_checkout_request_id,
+          'providerReceipt', new.provider_receipt,
+          'providerOrderTrackingId', new.provider_order_tracking_id,
+          'amountMinor', new.amount_minor,
+          'currency', new.currency,
+          'status', new.status,
+          'confirmedAt', new.confirmed_at
+        )
+      )
+    )
+    on conflict (endpoint_id, event_id) do nothing;
+  end loop;
+  return new;
+end;
+$$;
+
+drop trigger if exists payment_transaction_webhook_outbox on public.payment_transactions;
+create trigger payment_transaction_webhook_outbox
+after update of status on public.payment_transactions
+for each row execute function public.enqueue_payment_merchant_webhooks();

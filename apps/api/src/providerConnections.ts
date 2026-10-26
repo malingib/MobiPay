@@ -29,7 +29,7 @@ function encryptionKey() {
   return key;
 }
 
-function encryptCredentials(value: ProviderCredentials) {
+export function encryptProviderCredentials(value: ProviderCredentials) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
@@ -37,7 +37,7 @@ function encryptCredentials(value: ProviderCredentials) {
   return `v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
 }
 
-function decryptCredentials(payload: string): ProviderCredentials {
+export function decryptProviderCredentials(payload: string): ProviderCredentials {
   const [version, ivText, tagText, ciphertextText] = payload.split(":");
   if (version !== "v1" || !ivText || !tagText || !ciphertextText) throw new Error("Unsupported credential ciphertext format");
   const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivText, "base64url"));
@@ -104,7 +104,7 @@ router.put("/tenants/:tenantId/provider-connections/:provider", async (req, res,
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
     let encrypted: string;
-    try { encrypted = encryptCredentials(parsed.data); }
+    try { encrypted = encryptProviderCredentials(parsed.data); }
     catch { return res.status(503).json({ error: "credential_encryption_unavailable", message: "Provider credential encryption is not configured correctly." }); }
     const result = await getPool().query(
       `insert into public.payment_provider_configs(tenant_id,provider,account_reference,secret_reference,environment,enabled,encrypted_credentials,connection_status,last_error_code,created_by,updated_at)
@@ -136,7 +136,7 @@ router.post("/tenants/:tenantId/provider-connections/:provider/test", async (req
     );
     if (!found.rows[0]) return res.status(404).json({ error: "provider_credentials_not_found" });
     let credentials: ProviderCredentials;
-    try { credentials = decryptCredentials(String(found.rows[0].encrypted_credentials)); }
+    try { credentials = decryptProviderCredentials(String(found.rows[0].encrypted_credentials)); }
     catch { return res.status(503).json({ error: "credential_decryption_failed", message: "Credentials could not be decrypted. Verify the encryption key has not changed." }); }
     try {
       await verifySandbox(providerParsed.data, credentials);
@@ -189,7 +189,7 @@ export async function getTenantProviderCredentials(tenantId: string, provider: "
   if (!row || !row.encrypted_credentials || row.connection_status !== "verified" || row.enabled !== true) {
     throw new Error("merchant_provider_not_connected");
   }
-  return decryptCredentials(String(row.encrypted_credentials));
+  return decryptProviderCredentials(String(row.encrypted_credentials));
 }
 
 export default router;

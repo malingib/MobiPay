@@ -44,6 +44,6 @@ The connected Neon organization rejected project creation because it is managed 
 - Add alerts, backups, restore tests, structured monitoring, and incident-response procedures.
 - Obtain provider and Kenyan legal/regulatory confirmation before live collection or fund movement.
 
-A durable reconciliation-run schema is present, but statement-file parsing/import API, scheduled ingestion and review UI remain follow-up work. Early callbacks are stored for review/retry, but automated replay of orphaned provider events remains a launch blocker until implemented.
+A durable reconciliation-run schema is present, but statement-file parsing/import API, scheduled ingestion and review UI remain follow-up work. Early callbacks are persisted with their payloads and retried by the optional provider-event recovery worker.
 
 The platform does not hold customer funds by design. Never store card data, M-Pesa PINs, bank passwords, or live provider secrets in source control.

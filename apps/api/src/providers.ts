@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 
-function required(name: string) {
-  const value = process.env[name];
+function required(name: string, credentials?: Record<string, string>) {
+  const credentialFields: Record<string, string> = {
+    DARAJA_CONSUMER_KEY: "consumerKey", DARAJA_CONSUMER_SECRET: "consumerSecret", DARAJA_SHORTCODE: "shortCode", DARAJA_PASSKEY: "passkey",
+    PESAPAL_CONSUMER_KEY: "consumerKey", PESAPAL_CONSUMER_SECRET: "consumerSecret", PESAPAL_IPN_ID: "ipnId",
+  };
+  const value = credentials?.[credentialFields[name] ?? ""] ?? process.env[name];
   if (!value) throw new Error(`${name} is not configured`);
   return value;
 }
@@ -23,8 +27,8 @@ async function responseJson(response: Response) {
   return body;
 }
 
-export async function darajaAccessToken() {
-  const credentials = Buffer.from(`${required("DARAJA_CONSUMER_KEY")}:${required("DARAJA_CONSUMER_SECRET")}`).toString("base64");
+export async function darajaAccessToken(credentials?: Record<string, string>) {
+  const credentials = Buffer.from(`${required("DARAJA_CONSUMER_KEY", credentials)}:${required("DARAJA_CONSUMER_SECRET", credentials)}`).toString("base64");
   const response = await fetch(`${baseUrl("DARAJA_BASE_URL","https://sandbox.safaricom.co.ke")}/oauth/v1/generate?grant_type=client_credentials`, {
     headers: { authorization: `Basic ${credentials}` },
     signal: AbortSignal.timeout(10_000),
@@ -34,10 +38,10 @@ export async function darajaAccessToken() {
   return body.access_token;
 }
 
-export async function initiateDarajaStk(input: { phone: string; amount: number; accountReference: string; description: string; callbackUrl: string }) {
+export async function initiateDarajaStk(input: { phone: string; amount: number; accountReference: string; description: string; callbackUrl: string }, credentials?: Record<string, string>) {
   if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") throw new Error("Live Daraja initiation is disabled pending production readiness approval");
-  const token = await darajaAccessToken();
-  const shortCode = required("DARAJA_SHORTCODE"), passkey = required("DARAJA_PASSKEY");
+  const token = await darajaAccessToken(credentials);
+  const shortCode = required("DARAJA_SHORTCODE", credentials), passkey = required("DARAJA_PASSKEY", credentials);
   const time = timestamp();
   const password = Buffer.from(`${shortCode}${passkey}${time}`).toString("base64");
   const response = await fetch(`${baseUrl("DARAJA_BASE_URL","https://sandbox.safaricom.co.ke")}/mpesa/stkpush/v1/processrequest`, {
@@ -58,7 +62,7 @@ export async function initiateDarajaStk(input: { phone: string; amount: number; 
   return { checkoutRequestId: body.CheckoutRequestID, merchantRequestId: String(body.MerchantRequestID ?? ""), responseDescription: String(body.ResponseDescription ?? "") };
 }
 
-export async function queryDarajaStk(checkoutRequestId: string) {
+export async function queryDarajaStk(checkoutRequestId: string, credentials?: Record<string, string>) {
   const token = await darajaAccessToken();
   const shortCode = required("DARAJA_SHORTCODE"), passkey = required("DARAJA_PASSKEY");
   const time = timestamp();
@@ -72,11 +76,11 @@ export async function queryDarajaStk(checkoutRequestId: string) {
   return responseJson(response);
 }
 
-export async function pesapalAccessToken() {
+export async function pesapalAccessToken(credentials?: Record<string, string>) {
   if ((process.env.PESAPAL_ENV ?? "sandbox") !== "sandbox") throw new Error("Live Pesapal operations are disabled pending production readiness approval");
   const response = await fetch(`${baseUrl("PESAPAL_BASE_URL","https://cybqa.pesapal.com/pesapalv3")}/api/Auth/RequestToken`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ consumer_key: required("PESAPAL_CONSUMER_KEY"), consumer_secret: required("PESAPAL_CONSUMER_SECRET") }),
+    body: JSON.stringify({ consumer_key: required("PESAPAL_CONSUMER_KEY", credentials), consumer_secret: required("PESAPAL_CONSUMER_SECRET", credentials) }),
     signal: AbortSignal.timeout(10_000),
   });
   const body = await responseJson(response);
@@ -84,14 +88,14 @@ export async function pesapalAccessToken() {
   return body.token;
 }
 
-export async function submitPesapalOrder(input: { reference: string; amount: number; description: string; callbackUrl: string; email?: string; phone?: string }) {
-  const token = await pesapalAccessToken();
+export async function submitPesapalOrder(input: { reference: string; amount: number; description: string; callbackUrl: string; email?: string; phone?: string }, credentials?: Record<string, string>) {
+  const token = await pesapalAccessToken(credentials);
   const response = await fetch(`${baseUrl("PESAPAL_BASE_URL","https://cybqa.pesapal.com/pesapalv3")}/api/Transactions/SubmitOrderRequest`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       id: input.reference, currency: "KES", amount: input.amount, description: input.description,
-      callback_url: input.callbackUrl, notification_id: required("PESAPAL_IPN_ID"),
+      callback_url: input.callbackUrl, notification_id: required("PESAPAL_IPN_ID", credentials),
       billing_address: { email_address: input.email ?? "payments@example.invalid", phone_number: input.phone ?? "", country_code: "KE" },
     }),
     signal: AbortSignal.timeout(15_000),
@@ -101,7 +105,7 @@ export async function submitPesapalOrder(input: { reference: string; amount: num
   return { orderTrackingId: body.order_tracking_id, redirectUrl: body.redirect_url, merchantReference: String(body.merchant_reference ?? input.reference) };
 }
 
-export async function queryPesapalStatus(orderTrackingId: string) {
+export async function queryPesapalStatus(orderTrackingId: string, credentials?: Record<string, string>) {
   const token = await pesapalAccessToken();
   const response = await fetch(`${baseUrl("PESAPAL_BASE_URL","https://cybqa.pesapal.com/pesapalv3")}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/json" },

@@ -6,8 +6,13 @@ function required(name: string) {
   return value;
 }
 function timestamp() {
-  const d = new Date();
-  return [d.getFullYear(),String(d.getMonth()+1).padStart(2,"0"),String(d.getDate()).padStart(2,"0"),String(d.getHours()).padStart(2,"0"),String(d.getMinutes()).padStart(2,"0"),String(d.getSeconds()).padStart(2,"0")].join("");
+  // Daraja timestamps are interpreted in East Africa Time, regardless of host timezone.
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Nairobi", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date());
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}${part("month")}${part("day")}${part("hour")}${part("minute")}${part("second")}`;
 }
 function baseUrl(name: string, fallback: string) {
   return (process.env[name] ?? fallback).replace(/\/$/, "");
@@ -29,7 +34,7 @@ export async function darajaAccessToken() {
   return body.access_token;
 }
 
-export async function initiateDarajaStk(input: { phone: string; amount: number; accountReference: string; description: string }) {
+export async function initiateDarajaStk(input: { phone: string; amount: number; accountReference: string; description: string; callbackUrl: string }) {
   if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") throw new Error("Live Daraja initiation is disabled pending production readiness approval");
   const token = await darajaAccessToken();
   const shortCode = required("DARAJA_SHORTCODE"), passkey = required("DARAJA_PASSKEY");
@@ -41,7 +46,7 @@ export async function initiateDarajaStk(input: { phone: string; amount: number; 
     body: JSON.stringify({
       BusinessShortCode: shortCode, Password: password, Timestamp: time, TransactionType: "CustomerPayBillOnline",
       Amount: input.amount, PartyA: input.phone, PartyB: shortCode, PhoneNumber: input.phone,
-      CallBackURL: required("DARAJA_CALLBACK_URL"), AccountReference: input.accountReference.slice(0,12),
+      CallBackURL: input.callbackUrl, AccountReference: input.accountReference.slice(0,12),
       TransactionDesc: input.description.slice(0,13),
     }),
     signal: AbortSignal.timeout(15_000),

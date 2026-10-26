@@ -33,9 +33,11 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, then `neon/migrations/003_merchant_provider_security.sql` to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete.
 
-## Important deployment blocker
+## Deployment configuration
 
-The connected Neon organization rejected project creation because it is managed by Vercel. No existing database was modified because the available Neon projects belong to other work or have not been identified as the dedicated MobiWave Payments database. Provision a dedicated database through the owning Vercel/Neon integration, then apply and test `neon/migrations/001_payment_foundation.sql` before deploying the API.
+The dedicated Neon project `mobiwave-paymenrs` is connected to the MobiPay Vercel project. Migrations 001–003 are applied to the production branch and the required payment tables, provider-encryption columns, and read policies have been verified. A separate `mobipay-preview` Neon branch is used for preview deployments so preview testing does not write to production data.
+
+The Vercel project builds the React/Vite frontend and exposes the Express API through `api/[...path].ts`. Keep `DATABASE_URL`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, and `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` in server-side deployment secrets. Do not put database credentials or encryption keys in `VITE_*` variables. The frontend uses the same deployment origin for API calls when `VITE_API_BASE_URL` is blank.
 
 ## Neon Auth merchant onboarding
 

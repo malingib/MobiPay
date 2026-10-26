@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getPool } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
 
 const router = Router();
 const tenantIdSchema = z.string().uuid();
@@ -17,6 +18,11 @@ const createTransactionSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/).default("KES"),
   payerReference: z.string().trim().max(120).optional(),
   description: z.string().trim().max(500).optional(),
+});
+const webhookEndpointSchema = z.object({
+  url: z.string().url().max(2048),
+  signingSecretReference: z.string().regex(/^[A-Z][A-Z0-9_]{2,127}$/),
+  subscribedEvents: z.array(z.enum(["payment.succeeded","payment.failed","payment.cancelled"])).min(1).max(3).default(["payment.succeeded","payment.failed"]),
 });
 const resolveSchema = z.object({
   status: z.enum(["resolved", "dismissed"]),
@@ -36,6 +42,59 @@ function validTenantParam(value: string) {
 }
 
 router.use(requireAuth);
+
+router.get("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
+  try {
+    if (!await membership(req.authUser!.id,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const result=await getPool().query(
+      "select id,url,subscribed_events,enabled,created_at,updated_at from public.payment_merchant_webhook_endpoints where tenant_id=$1 order by created_at desc",
+      [tenantId],
+    );
+    return res.json({endpoints:result.rows});
+  } catch(error) { return next(error); }
+});
+
+router.post("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
+  const parsed=webhookEndpointSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.error.flatten()});
+  try {
+    const member=await membership(req.authUser!.id,tenantId);
+    if (!member) return res.status(404).json({error:"tenant_not_found"});
+    if (!["owner","admin"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    const secret=process.env[parsed.data.signingSecretReference];
+    if (!secret || secret.length<32) return res.status(400).json({error:"webhook_secret_not_configured",message:"Configure a random signing secret of at least 32 characters in deployment secret storage before registering this endpoint."});
+    try { await assertSafeWebhookUrl(parsed.data.url); }
+    catch { return res.status(400).json({error:"unsafe_webhook_url",message:"Endpoint must be a publicly routable HTTPS URL. Local, private, credentialed and non-HTTPS destinations are rejected."}); }
+    const result=await getPool().query(
+      "insert into public.payment_merchant_webhook_endpoints(tenant_id,url,signing_secret_reference,subscribed_events,enabled) values($1,$2,$3,$4::text[],true) returning id,url,subscribed_events,enabled,created_at",
+      [tenantId,parsed.data.url,parsed.data.signingSecretReference,parsed.data.subscribedEvents],
+    );
+    await getPool().query(
+      "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'webhook.endpoint.created','webhook_endpoint',$3,$4::jsonb)",
+      [tenantId,req.authUser!.id,result.rows[0].id,JSON.stringify({url:parsed.data.url,subscribedEvents:parsed.data.subscribedEvents})],
+    );
+    return res.status(201).json({endpoint:result.rows[0]});
+  } catch(error) { return next(error); }
+});
+
+router.post("/tenants/:tenantId/webhook-endpoints/:endpointId/disable", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? ""), endpointId=String(req.params.endpointId ?? "");
+  if (!validTenantParam(tenantId) || !validTenantParam(endpointId)) return res.status(400).json({error:"invalid_id"});
+  try {
+    const member=await membership(req.authUser!.id,tenantId);
+    if (!member) return res.status(404).json({error:"tenant_not_found"});
+    if (!["owner","admin"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    const result=await getPool().query("update public.payment_merchant_webhook_endpoints set enabled=false,updated_at=now() where id=$1 and tenant_id=$2 returning id,enabled",[endpointId,tenantId]);
+    if (!result.rows[0]) return res.status(404).json({error:"webhook_endpoint_not_found"});
+    await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id) values($1,$2,'webhook.endpoint.disabled','webhook_endpoint',$3)",[tenantId,req.authUser!.id,endpointId]);
+    return res.json({endpoint:result.rows[0]});
+  } catch(error) { return next(error); }
+});
+
 
 router.post("/tenants", async (req, res, next) => {
   const parsed = createTenantSchema.safeParse(req.body);

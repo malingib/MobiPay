@@ -1,3 +1,6 @@
-// Vercel catch-all function for the Express API. The app module exports an Express
-// application without opening a listening socket, so Vercel owns the request lifecycle.
-export { default } from "../apps/api/dist/app.js";
+import app from "../apps/api/src/app.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+export default function handler(req: IncomingMessage, res: ServerResponse) {
+  return app(req, res);
+}

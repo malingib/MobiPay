@@ -28,3 +28,34 @@ create policy payment_provider_config_read on public.payment_provider_configs
 alter table public.payment_provider_configs
   add constraint payment_provider_config_ciphertext_format
   check (encrypted_credentials is null or encrypted_credentials ~ '^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$');
+
+
+-- Database-level tenant binding: a transaction or webhook endpoint from one tenant
+-- cannot be attached to another tenant's reconciliation or delivery records.
+create unique index if not exists payment_transactions_tenant_id_id_idx
+  on public.payment_transactions(tenant_id, id);
+create unique index if not exists payment_webhook_endpoints_tenant_id_id_idx
+  on public.payment_merchant_webhook_endpoints(tenant_id, id);
+
+do $constraints$
+begin
+  if not exists (select 1 from pg_constraint where conname='payment_exceptions_tenant_transaction_fk') then
+    alter table public.payment_reconciliation_exceptions
+      add constraint payment_exceptions_tenant_transaction_fk
+      foreign key (tenant_id, transaction_id)
+      references public.payment_transactions(tenant_id, id);
+  end if;
+  if not exists (select 1 from pg_constraint where conname='payment_reconciliation_records_tenant_transaction_fk') then
+    alter table public.payment_reconciliation_records
+      add constraint payment_reconciliation_records_tenant_transaction_fk
+      foreign key (tenant_id, transaction_id)
+      references public.payment_transactions(tenant_id, id);
+  end if;
+  if not exists (select 1 from pg_constraint where conname='payment_webhook_deliveries_tenant_endpoint_fk') then
+    alter table public.payment_merchant_webhook_deliveries
+      add constraint payment_webhook_deliveries_tenant_endpoint_fk
+      foreign key (tenant_id, endpoint_id)
+      references public.payment_merchant_webhook_endpoints(tenant_id, id);
+  end if;
+end;
+$constraints$;

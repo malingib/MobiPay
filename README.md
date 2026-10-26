@@ -11,7 +11,8 @@ MobiWave Payments is a Kenya-focused multi-tenant payments visibility and reconc
 - Tenant membership and role checks for transaction APIs and exception resolution.
 - Transaction CSV exports with spreadsheet-formula injection protection.
 - Conservative reconciliation matching and exception classification.
-- Merchant-owned Daraja and Pesapal sandbox credential connections, encrypted at rest with AES-256-GCM and isolated by tenant. Merchant owners/admins can save credentials, test provider authentication, inspect connection metadata without secret disclosure, and remove credentials.\n- Sandbox-only Daraja STK initiation and callback processing. The tenant-specific callback URL is passed to the provider adapter; callback success is not accepted without a server-side STK status query and amount/receipt checks. Provider checkout, callbacks and retry recovery use the owning merchant’s credentials.
+- Merchant-owned Daraja and Pesapal sandbox credential connections, encrypted at rest with AES-256-GCM and isolated by tenant. Merchant owners/admins can save credentials, test provider authentication, inspect connection metadata without secret disclosure, and remove credentials.
+- Sandbox-only Daraja STK initiation and callback processing. The tenant-specific callback URL is passed to the provider adapter; callback success is not accepted without a server-side STK status query and amount/receipt checks. Provider checkout, callbacks and retry recovery use the owning merchant’s credentials.
 - Separate Daraja checkout-request ID, M-Pesa receipt and Pesapal tracking ID columns; database-enforced payment-state transitions.
 - Sandbox-only Pesapal order submission and server-side status inquiry before marking transactions successful; idempotent checkout replay returns the original checkout URL when available.
 - Signed merchant webhook endpoints with transactional outbox, retry/backoff, dead-lettering and an optional delivery worker.
@@ -21,7 +22,8 @@ MobiWave Payments is a Kenya-focused multi-tenant payments visibility and reconc
 
 See `.env.example` and [the payment operations runbook](docs/payment-operations-runbook.md). Configure real values only in deployment secret storage:
 
-- `DATABASE_URL` — dedicated Neon PostgreSQL connection string.\n- `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` — base64-encoded 32-byte key for AES-256-GCM encryption of merchant-owned Daraja/Pesapal credentials. Generate with `openssl rand -base64 32`; store only in deployment secrets and preserve it securely. If lost, stored credentials cannot be decrypted.
+- `DATABASE_URL` — dedicated Neon PostgreSQL connection string.
+- `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` — base64-encoded 32-byte key for AES-256-GCM encryption of merchant-owned Daraja/Pesapal credentials. Generate with `openssl rand -base64 32`; store only in deployment secrets and preserve it securely. If lost, stored credentials cannot be decrypted.
 - `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration.
 - A long random `DARAJA_CALLBACK_TOKEN`; each merchant supplies their own Daraja sandbox credentials through the authenticated provider-connections API.
 - Each merchant supplies their own Pesapal sandbox credentials and registered IPN ID through the authenticated provider-connections API.
@@ -35,7 +37,26 @@ Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment
 
 The connected Neon organization rejected project creation because it is managed by Vercel. No existing database was modified because the available Neon projects belong to other work or have not been identified as the dedicated MobiWave Payments database. Provision a dedicated database through the owning Vercel/Neon integration, then apply and test `neon/migrations/001_payment_foundation.sql` before deploying the API.
 
-## Merchant onboarding and provider connections\n\n1. A merchant signs in through the configured identity provider and creates a tenant via `POST /api/v1/tenants`; the authenticated user becomes its owner.\n2. An owner/admin saves sandbox credentials using `PUT /api/v1/tenants/:tenantId/provider-connections/daraja` or `.../pesapal`. The API encrypts the secret payload before database persistence and never returns the secret.\n3. Verify sandbox authentication using `POST /api/v1/tenants/:tenantId/provider-connections/:provider/test`. This verifies API authentication only; it does not prove checkout, callbacks, settlement or live readiness.\n4. List connection metadata using `GET /api/v1/tenants/:tenantId/provider-connections`, or remove a connection using `DELETE /api/v1/tenants/:tenantId/provider-connections/:provider`.\n\nProvider credentials are scoped to a tenant and are not shared between merchants. Only tenant owners/admins can change credentials; finance/admin/owner roles can initiate supported sandbox payment flows. Keep `DARAJA_ENV=sandbox` and `PESAPAL_ENV=sandbox`; live processing remains disabled. A configured identity provider and migration 003 are required before these endpoints are usable.\n\n## Production launch gates
+## Neon Auth merchant onboarding
+
+The web console uses Neon Auth (Managed Better Auth) for merchant registration and sign-in. Configure Neon Auth on the dedicated MobiPay project branch and set the following deployment variables:
+
+- Frontend build variables: `VITE_NEON_AUTH_URL` (the branch Auth URL) and `VITE_API_BASE_URL` (the API origin). These are public URLs, not secrets.
+- API variables: `AUTH_ISSUER` (the exact issuer value emitted in Neon Auth JWTs), `AUTH_JWKS_URL` (the branch JWKS URL), and optionally `AUTH_AUDIENCE` only if the configured token includes an audience that should be enforced.
+- Set custom SMTP and verify email before production; do not rely on shared development email delivery for launch.
+
+The sign-up screen creates a Neon Auth user; the authenticated user can then create a merchant workspace. Workspace creation makes that user its owner. API requests send a short-lived Neon Auth JWT in the Authorization header. The API validates the signature using the configured JWKS and validates issuer before processing requests.
+
+## Merchant onboarding and provider connections
+
+1. A merchant registers/signs in through Neon Auth and creates a tenant via `POST /api/v1/tenants`; the authenticated user becomes its owner.
+2. An owner/admin saves sandbox credentials using `PUT /api/v1/tenants/:tenantId/provider-connections/daraja` or `.../pesapal`. The API encrypts the secret payload before database persistence and never returns the secret.
+3. Verify sandbox authentication using `POST /api/v1/tenants/:tenantId/provider-connections/:provider/test`. This verifies API authentication only; it does not prove checkout, callbacks, settlement or live readiness.
+4. List connection metadata using `GET /api/v1/tenants/:tenantId/provider-connections`, or remove a connection using `DELETE /api/v1/tenants/:tenantId/provider-connections/:provider`.
+
+Provider credentials are scoped to a tenant and are not shared between merchants. Only tenant owners/admins can change credentials; finance/admin/owner roles can initiate supported sandbox payment flows. Keep `DARAJA_ENV=sandbox` and `PESAPAL_ENV=sandbox`; live processing remains disabled. A configured identity provider and migration 003 are required before these endpoints are usable.
+
+## Production launch gates
 
 - Apply migration and test tenant isolation against two separate users and tenants.
 - Configure real authentication and test token issuer/audience/JWKS behavior.

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { z } from "zod";
+import rateLimit from "express-rate-limit";
 import { getPool } from "./db.js";
 import { requireAuth } from "./auth.js";
 
@@ -79,6 +80,8 @@ async function verifySandbox(provider: "daraja" | "pesapal", credentials: Provid
 }
 
 router.use(requireAuth);
+router.use((_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+const providerTestLimiter = rateLimit({ windowMs: 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false });
 
 router.get("/tenants/:tenantId/provider-connections", async (req, res, next) => {
   const tenantId = String(req.params.tenantId ?? "");
@@ -122,7 +125,7 @@ router.put("/tenants/:tenantId/provider-connections/:provider", async (req, res,
   } catch (error) { return next(error); }
 });
 
-router.post("/tenants/:tenantId/provider-connections/:provider/test", async (req, res, next) => {
+router.post("/tenants/:tenantId/provider-connections/:provider/test", providerTestLimiter, async (req, res, next) => {
   const tenantId = String(req.params.tenantId ?? "");
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });

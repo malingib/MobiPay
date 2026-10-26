@@ -190,4 +190,16 @@ router.delete("/tenants/:tenantId/provider-connections/:provider", async (req, r
   } catch (error) { return next(error); }
 });
 
+export async function getTenantProviderCredentials(tenantId: string, provider: "daraja" | "pesapal"): Promise<ProviderCredentials> {
+  const result = await getPool().query(
+    "select encrypted_credentials,connection_status,enabled from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary'",
+    [tenantId, provider],
+  );
+  const row = result.rows[0];
+  if (!row || !row.encrypted_credentials || row.connection_status !== "verified" || row.enabled !== true) {
+    throw new Error("merchant_provider_not_connected");
+  }
+  return decryptCredentials(String(row.encrypted_credentials));
+}
+
 export default router;

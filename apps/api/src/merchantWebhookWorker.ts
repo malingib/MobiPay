@@ -40,6 +40,10 @@ export async function assertSafeWebhookUrl(raw: string) {
   }
 }
 
+export function signMerchantWebhookPayload(payload: unknown, secret: string): string {
+  return createHmac("sha256", secret).update(JSON.stringify(payload)).digest("hex");
+}
+
 function resolveSecret(reference: string): string {
   if (!/^[A-Z][A-Z0-9_]{2,127}$/.test(reference)) throw new Error("Invalid webhook secret reference");
   const value = process.env[reference];
@@ -82,7 +86,7 @@ export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promi
       await assertSafeWebhookUrl(delivery.url);
       const secret = resolveSecret(delivery.signing_secret_reference);
       const body = JSON.stringify(delivery.payload);
-      const signature = createHmac("sha256", secret).update(body).digest("hex");
+      const signature = signMerchantWebhookPayload(delivery.payload, secret);
       const response = await fetch(delivery.url, {
         method: "POST",
         redirect: "error",

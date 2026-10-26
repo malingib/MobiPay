@@ -17,6 +17,16 @@ export function createApp() {
   app.use(cors({
     origin(origin, callback) {
       if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      try {
+        const hostname = new URL(origin).hostname;
+        // Permit this project's Vercel preview hosts; API routes still require a valid JWT.
+        if (hostname === "mobipay-zeta.vercel.app" ||
+            (hostname.startsWith("mobipay-") && hostname.endsWith("-dwaynes-projects-c48061a4.vercel.app"))) {
+          return callback(null, true);
+        }
+      } catch {
+        // Invalid Origin is rejected below.
+      }
       const error = new Error("Origin not allowed");
       Object.assign(error, { status: 403, code: "origin_not_allowed" });
       return callback(error);

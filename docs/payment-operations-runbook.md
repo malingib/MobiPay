@@ -47,7 +47,7 @@ Migrations are not applied automatically by the API. Apply them deliberately thr
 - Match exact provider references first, then merchant reference only when unique; require amount and currency equality.
 - Never auto-resolve ambiguous or amount-mismatch rows.
 - Store source hash, run ID, raw record, match outcome and exception decision for audit.
-- The migration creates durable reconciliation-run/record tables. A full statement import UI/API and automated scheduled statement ingestion are still required before calling this workflow complete.
+- The migration creates durable reconciliation-run/record tables, and `POST /api/v1/tenants/:tenantId/reconciliation/import` accepts a bounded CSV upload. Automated scheduled statement ingestion and a dedicated reconciliation review UI remain follow-up work.
 
 ## Minimum verification before launch
 
@@ -57,6 +57,7 @@ Migrations are not applied automatically by the API. Apply them deliberately thr
 - [ ] Test duplicate/concurrent Daraja callbacks, early callbacks, invalid callback token, provider timeout, amount mismatch, duplicate receipt and late callback after terminal state.
 - [ ] Test Pesapal notification duplication, status-query timeout, mismatched currency/amount and idempotent checkout replay.
 - [ ] Test webhook signature verification, private/local URL rejection, timeout, non-2xx, redirect rejection, retry schedule, dead-letter and worker restart recovery.
+- [ ] Import the same CSV twice and verify idempotency; test malformed CSV, ambiguous matches, duplicates, amount mismatch and cross-tenant import attempts.
 - [ ] Verify database backups and perform a restore drill.
 - [ ] Configure structured logs, request correlation IDs, alerts for pending/unknown payments, retry provider events, open exceptions and webhook dead letters.
 - [ ] Complete provider sandbox tests with real provider-issued sandbox credentials and publicly reachable HTTPS callbacks.

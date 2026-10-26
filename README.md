@@ -23,8 +23,8 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 - `DATABASE_URL` — dedicated Neon PostgreSQL connection string.\n- `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` — base64-encoded 32-byte key for AES-256-GCM encryption of merchant-owned Daraja/Pesapal credentials. Generate with `openssl rand -base64 32`; store only in deployment secrets and preserve it securely. If lost, stored credentials cannot be decrypted.
 - `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration.
-- Daraja sandbox credentials and a long random `DARAJA_CALLBACK_TOKEN`.
-- Pesapal sandbox credentials and registered `PESAPAL_IPN_ID`.
+- A long random `DARAJA_CALLBACK_TOKEN`; each merchant supplies their own Daraja sandbox credentials through the authenticated provider-connections API.
+- Each merchant supplies their own Pesapal sandbox credentials and registered IPN ID through the authenticated provider-connections API.
 - `PUBLIC_API_BASE_URL` — public HTTPS API base URL used to construct provider callback URLs.
 
 ## Migration and operational requirements

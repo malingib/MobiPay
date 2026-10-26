@@ -85,6 +85,8 @@ create table if not exists public.payment_merchant_webhook_deliveries (
   payload jsonb not null,
   status text not null default 'pending' check (status in ('pending','delivering','delivered','retry','dead_letter')),
   attempts integer not null default 0 check (attempts >= 0),
+  claimed_at timestamptz,
+  updated_at timestamptz not null default now(),
   next_attempt_at timestamptz not null default now(),
   last_http_status integer,
   last_error text,

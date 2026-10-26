@@ -5,6 +5,7 @@ alter table public.payment_transactions
   add column if not exists provider_checkout_request_id text,
   add column if not exists provider_receipt text,
   add column if not exists provider_order_tracking_id text,
+  add column if not exists provider_checkout_url text,
   add column if not exists initiation_attempts integer not null default 0 check (initiation_attempts >= 0),
   add column if not exists last_provider_error text;
 

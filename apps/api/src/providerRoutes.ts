@@ -59,7 +59,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
       if (!transaction) {
         const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_transaction_id,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
         const row = prior.rows[0];
-        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor) {
+        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.payer_reference!==d.phone) {
           await client.query("rollback"); return res.status(409).json({error:"idempotency_conflict"});
         }
         await client.query("commit");
@@ -73,7 +73,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     if (!callbackToken) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
-      const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description});
+      const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl});
       await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
       return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
@@ -137,7 +137,7 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
       verified=String(status.ResultCode)==="0" && callback.ResultCode===0 && callbackAmount!==undefined && callbackAmount*100===Number(row.amount_minor) && typeof receipt==="string" && receipt.length>0;
     } catch { verified=false; }
     if (verified) {
-      await getPool().query("update public.payment_transactions set status='succeeded',provider_status='status_query_verified',provider_transaction_id=$1,confirmed_at=now(),updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending','unknown')",[receipt,row.id,tenantId]);
+      await getPool().query("update public.payment_transactions set status='succeeded',provider_status='status_query_verified',provider_receipt=$1,confirmed_at=coalesce(confirmed_at,now()),updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending','unknown')",[receipt,row.id,tenantId]);
       await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,metadata) values($1,'daraja.callback.verified','transaction',$2,$3::jsonb)",[tenantId,row.id,JSON.stringify({receipt})]);
     } else {

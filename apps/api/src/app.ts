@@ -21,7 +21,7 @@ export function createApp() {
       return callback(error);
     },
   }));
-  app.use(express.json({ limit: "64kb", type: "application/json" }));
+  app.use(express.json({ limit: "2mb", type: "application/json" }));
   app.use(rateLimit({
     windowMs: 60_000,
     limit: 120,
@@ -66,7 +66,7 @@ export function createApp() {
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const error = err as { status?: number; type?: string; code?: string };
     if (error?.type === "entity.too.large") {
-      return res.status(413).json({ error: "payload_too_large", message: "Request body exceeds the allowed size." });
+      return res.status(413).json({ error: "payload_too_large", message: "Request body exceeds the 2 MB limit." });
     }
     if (error?.type === "entity.parse.failed") {
       return res.status(400).json({ error: "invalid_json", message: "Request body must contain valid JSON." });

@@ -114,3 +114,29 @@ create policy payment_merchant_webhook_delivery_read on public.payment_merchant_
   for select using (public.is_payment_tenant_member(tenant_id));
 
 -- No browser write policies are added. Server-side code owns all payment mutations.
+
+
+-- Enforce a monotonic payment lifecycle. Terminal outcomes cannot silently be
+-- overwritten by late callbacks; conflicting provider evidence must be reviewed.
+create or replace function public.enforce_payment_status_transition()
+returns trigger language plpgsql as $$
+begin
+  if new.status = old.status then
+    return new;
+  end if;
+  if not (
+    (old.status = 'created' and new.status in ('pending','failed','cancelled','unknown')) or
+    (old.status = 'pending' and new.status in ('succeeded','failed','cancelled','expired','unknown')) or
+    (old.status = 'unknown' and new.status in ('pending','succeeded','failed','cancelled','expired')) 
+  ) then
+    raise exception 'invalid payment status transition: % -> %', old.status, new.status
+      using errcode = 'check_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists payment_transaction_status_transition on public.payment_transactions;
+create trigger payment_transaction_status_transition
+before update of status on public.payment_transactions
+for each row execute function public.enforce_payment_status_transition();

@@ -54,16 +54,6 @@ async function memberRole(userId: string, tenantId: string) {
   return result.rows[0]?.role as string | undefined;
 }
 
-function providerMetadata(provider: string, credentials: ProviderCredentials) {
-  if (provider === "daraja" && "shortCode" in credentials) {
-    return { accountLabel: `Short code ending ${credentials.shortCode.slice(-4)}` };
-  }
-  if (provider === "pesapal" && "consumerKey" in credentials) {
-    return { accountLabel: `Consumer key ending ${credentials.consumerKey.slice(-4)}` };
-  }
-  return { accountLabel: "Connected account" };
-}
-
 async function verifySandbox(provider: "daraja" | "pesapal", credentials: ProviderCredentials) {
   if (provider === "daraja" && "shortCode" in credentials) {
     const response = await fetch("https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials", {

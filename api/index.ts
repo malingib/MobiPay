@@ -1,9 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import app from "../apps/api/src/app.js";
 
 type VercelRequest = IncomingMessage & { url?: string };
 
-export default function handler(req: VercelRequest, res: ServerResponse) {
+export default async function handler(req: VercelRequest, res: ServerResponse) {
+  const mod = await import("../apps/api/src/app.js");
+  const app = mod.default as (req: IncomingMessage, res: ServerResponse) => unknown;
   const incoming = new URL(req.url ?? "/", "https://internal.invalid");
   const path = incoming.searchParams.get("__path");
   if (path) {

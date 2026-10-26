@@ -28,9 +28,9 @@ async function responseJson(response: Response) {
 }
 
 export async function darajaAccessToken(credentials?: Record<string, string>) {
-  const credentials = Buffer.from(`${required("DARAJA_CONSUMER_KEY", credentials)}:${required("DARAJA_CONSUMER_SECRET", credentials)}`).toString("base64");
+  const authHeader = Buffer.from(`${required("DARAJA_CONSUMER_KEY", credentials)}:${required("DARAJA_CONSUMER_SECRET", credentials)}`).toString("base64");
   const response = await fetch(`${baseUrl("DARAJA_BASE_URL","https://sandbox.safaricom.co.ke")}/oauth/v1/generate?grant_type=client_credentials`, {
-    headers: { authorization: `Basic ${credentials}` },
+    headers: { authorization: `Basic ${authHeader}` },
     signal: AbortSignal.timeout(10_000),
   });
   const body = await responseJson(response);
@@ -63,8 +63,8 @@ export async function initiateDarajaStk(input: { phone: string; amount: number; 
 }
 
 export async function queryDarajaStk(checkoutRequestId: string, credentials?: Record<string, string>) {
-  const token = await darajaAccessToken();
-  const shortCode = required("DARAJA_SHORTCODE"), passkey = required("DARAJA_PASSKEY");
+  const token = await darajaAccessToken(credentials);
+  const shortCode = required("DARAJA_SHORTCODE", credentials), passkey = required("DARAJA_PASSKEY", credentials);
   const time = timestamp();
   const password = Buffer.from(`${shortCode}${passkey}${time}`).toString("base64");
   const response = await fetch(`${baseUrl("DARAJA_BASE_URL","https://sandbox.safaricom.co.ke")}/mpesa/stkpushquery/v1/query`, {
@@ -106,7 +106,7 @@ export async function submitPesapalOrder(input: { reference: string; amount: num
 }
 
 export async function queryPesapalStatus(orderTrackingId: string, credentials?: Record<string, string>) {
-  const token = await pesapalAccessToken();
+  const token = await pesapalAccessToken(credentials);
   const response = await fetch(`${baseUrl("PESAPAL_BASE_URL","https://cybqa.pesapal.com/pesapalv3")}/api/Transactions/GetTransactionStatus?orderTrackingId=${encodeURIComponent(orderTrackingId)}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/json" },
     signal: AbortSignal.timeout(15_000),

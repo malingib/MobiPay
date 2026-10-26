@@ -78,7 +78,7 @@ router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => 
       }
       const runId=created.rows[0].id as string;
       const ledger=await client.query(
-        "select id,provider,coalesce(provider_receipt,provider_order_tracking_id,provider_checkout_request_id,provider_transaction_id) as provider_reference,merchant_reference,amount_minor,currency from public.payment_transactions where tenant_id=$1 and provider=$2 order by created_at desc limit 20000",
+        "select id,provider,coalesce(provider_receipt,provider_order_tracking_id,provider_checkout_request_id,provider_transaction_id) as provider_reference,merchant_reference,amount_minor,currency from public.payment_transactions where tenant_id=$1 and provider=$2 order by created_at desc",
         [tenantId,parsed.data.provider],
       );
       const matches=reconcileRecords(

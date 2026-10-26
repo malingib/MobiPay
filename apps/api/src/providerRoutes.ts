@@ -57,13 +57,13 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
       );
       transaction = inserted.rows[0];
       if (!transaction) {
-        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_transaction_id,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
+        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_checkout_request_id,status,payer_reference from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
         const row = prior.rows[0];
         if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.payer_reference!==d.phone) {
           await client.query("rollback"); return res.status(409).json({error:"idempotency_conflict"});
         }
         await client.query("commit");
-        return res.status(200).json({transactionId:row.id,status:row.status,checkoutRequestId:row.provider_transaction_id,idempotentReplay:true});
+        return res.status(200).json({transactionId:row.id,status:row.status,checkoutRequestId:row.provider_checkout_request_id,idempotentReplay:true});
       }
       await client.query("commit");
     } catch (error) { await client.query("rollback").catch(()=>undefined); throw error; }
@@ -74,7 +74,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
       const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl});
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_request_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
       return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
     } catch {
@@ -102,7 +102,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone});
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,status='pending',provider_status='checkout_created',updated_at=now() where id=$2",[provider.orderTrackingId,transactionId]);
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,status='pending',provider_status='checkout_created',updated_at=now() where id=$2",[provider.orderTrackingId,transactionId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {
@@ -118,7 +118,7 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
   const callback=(req.body as any)?.Body?.stkCallback;
   if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
   try {
-    const tx=await getPool().query("select id,amount_minor,status from public.payment_transactions where tenant_id=$1 and provider='daraja' and provider_transaction_id=$2",[tenantId,callback.CheckoutRequestID]);
+    const tx=await getPool().query("select id,amount_minor,status from public.payment_transactions where tenant_id=$1 and provider='daraja' and provider_checkout_request_id=$2",[tenantId,callback.CheckoutRequestID]);
     if (!tx.rows[0]) return res.status(200).json({ResultCode:0,ResultDesc:"Accepted for review"});
     const row=tx.rows[0];
     const eventId=callback.CheckoutRequestID;
@@ -155,7 +155,7 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
   const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
   if (!trackingId || trackingId.length>200) return res.status(400).send("Missing order tracking id");
   try {
-    const tx=await getPool().query("select id,amount_minor,currency,status from public.payment_transactions where tenant_id=$1 and provider='pesapal' and provider_transaction_id=$2",[tenantId,trackingId]);
+    const tx=await getPool().query("select id,amount_minor,currency,status from public.payment_transactions where tenant_id=$1 and provider='pesapal' and provider_order_tracking_id=$2",[tenantId,trackingId]);
     if (!tx.rows[0]) return res.status(200).send("Accepted for review");
     const row=tx.rows[0];
     const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status) values($1,'pesapal',$2,'ipn_status_query',$3,'received') on conflict do nothing returning id",[tenantId,trackingId,sha256Payload({query:req.query})]);

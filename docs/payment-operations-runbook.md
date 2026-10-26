@@ -23,7 +23,7 @@ Migrations are not applied automatically by the API. Apply them deliberately thr
 - Callback receipt is not payment confirmation. The API must query Daraja status and verify amount and receipt before marking success.
 - Keep the Daraja checkout request ID, M-Pesa receipt and Pesapal order tracking ID in their dedicated columns.
 - Pesapal notifications trigger a server-side status inquiry. Do not trust a browser redirect or notification query string as proof of payment.
-- An early or ambiguous callback is stored for review/retry; ensure provider-event records in `retry` are monitored and manually replayed until a scheduled recovery worker is operational.
+- An early or ambiguous callback is stored with its payload. Enable `MERCHANT_WEBHOOK_WORKER_ENABLED=true` to run the provider-event recovery worker and merchant webhook worker; monitor retry counts and reconciliation exceptions.
 
 ## Idempotency and state transitions
 

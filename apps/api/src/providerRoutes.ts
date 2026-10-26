@@ -57,9 +57,9 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
       );
       transaction = inserted.rows[0];
       if (!transaction) {
-        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_checkout_request_id,status,payer_reference from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
+        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_checkout_request_id,status,payer_reference,description from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
         const row = prior.rows[0];
-        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.payer_reference!==d.phone) {
+        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.payer_reference!==d.phone || row.description!==d.description) {
           await client.query("rollback"); return res.status(409).json({error:"idempotency_conflict"});
         }
         await client.query("commit");
@@ -97,12 +97,18 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
     const ins=await getPool().query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
-    if (!ins.rows[0]) return res.status(409).json({error:"idempotency_key_already_used"});
+    if (!ins.rows[0]) {
+      const prior=await getPool().query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
+      const row=prior.rows[0];
+      if (!row || row.provider!=="pesapal" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description || row.payer_reference!==(d.phone??null)) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if (row.provider_order_tracking_id && row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,orderTrackingId:row.provider_order_tracking_id,idempotentReplay:true});
+      return res.status(202).json({transactionId:row.id,status:row.status,message:"The provider outcome is being reconciled. Check transaction status before retrying."});
+    }
     const transactionId=ins.rows[0].id as string;
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone});
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,status='pending',provider_status='checkout_created',updated_at=now() where id=$2",[provider.orderTrackingId,transactionId]);
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3",[provider.orderTrackingId,provider.redirectUrl,transactionId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {

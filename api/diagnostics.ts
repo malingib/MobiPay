@@ -1,9 +1,14 @@
-export default async function handler(_req: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }) {
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
-    await import("../apps/api/src/app.js");
-    res.status(200).json({ ok: true, module: "loaded" });
+    const mod = await import("../apps/api/src/app.js");
+    const app = mod.default as (req: IncomingMessage, res: ServerResponse) => unknown;
+    return app(req, res);
   } catch (error) {
     const value = error as { name?: string; message?: string; code?: string };
-    res.status(500).json({ ok: false, name: value.name ?? "Error", code: value.code ?? null, message: value.message ?? "module initialization failed" });
+    res.statusCode = 500;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: false, name: value.name ?? "Error", code: value.code ?? null, message: value.message ?? "Express invocation failed" }));
   }
 }

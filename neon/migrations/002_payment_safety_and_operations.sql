@@ -205,3 +205,31 @@ drop trigger if exists payment_transaction_webhook_outbox on public.payment_tran
 create trigger payment_transaction_webhook_outbox
 after update of status on public.payment_transactions
 for each row execute function public.enqueue_payment_merchant_webhooks();
+
+
+-- Every payment state transition is written to the audit trail at the database layer,
+-- including provider callbacks and background recovery operations.
+create or replace function public.audit_payment_status_transition()
+returns trigger language plpgsql security definer set search_path = public as $audit$
+begin
+  if new.status is distinct from old.status then
+    insert into public.payment_audit_events
+      (tenant_id,actor_user_id,action,entity_type,entity_id,metadata)
+    values (
+      new.tenant_id,null,'transaction.status_changed','transaction',new.id,
+      jsonb_build_object(
+        'from',old.status,
+        'to',new.status,
+        'provider',new.provider,
+        'providerStatus',new.provider_status
+      )
+    );
+  end if;
+  return new;
+end;
+$audit$;
+
+drop trigger if exists payment_transaction_status_audit on public.payment_transactions;
+create trigger payment_transaction_status_audit
+after update of status on public.payment_transactions
+for each row execute function public.audit_payment_status_transition();

@@ -23,7 +23,8 @@ alter table public.payment_provider_events
   add column if not exists payload jsonb not null default '{}'::jsonb,
   add column if not exists processing_attempts integer not null default 0 check (processing_attempts >= 0),
   add column if not exists last_error text,
-  add column if not exists processing_started_at timestamptz;
+  add column if not exists processing_started_at timestamptz,
+  add column if not exists retry_at timestamptz not null default now();
 
 -- Store imported provider statement rows independently from the application transaction
 -- so unmatched, duplicate and amount-mismatch rows remain auditable.

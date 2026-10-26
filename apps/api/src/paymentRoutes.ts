@@ -86,7 +86,7 @@ router.get("/tenants/:tenantId/transactions", async (req, res, next) => {
     if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
     const result = await getPool().query(
-      "select id,provider,provider_transaction_id,merchant_reference,amount_minor,currency,status,payer_reference,description,provider_status,occurred_at,confirmed_at,created_at,updated_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit $2",
+      "select id,provider,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,merchant_reference,amount_minor,currency,status,payer_reference,description,provider_status,occurred_at,confirmed_at,created_at,updated_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit $2",
       [tenantId, limit],
     );
     return res.json({ transactions: result.rows });
@@ -176,7 +176,7 @@ router.get("/tenants/:tenantId/reports/transactions.csv", async (req, res, next)
   try {
     if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
     const result = await getPool().query(
-      "select id,provider,merchant_reference,amount_minor,currency,status,provider_transaction_id,created_at,confirmed_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit 10000",
+      "select id,provider,merchant_reference,amount_minor,currency,status,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,created_at,confirmed_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit 10000",
       [tenantId],
     );
     const safe = (value: unknown) => {
@@ -184,7 +184,7 @@ router.get("/tenants/:tenantId/reports/transactions.csv", async (req, res, next)
       const escaped = raw.replace(/"/g, '""');
       return /^[=+@\-\t\r]/.test(raw) ? "'" + escaped : escaped;
     };
-    const columns = ["id","provider","merchant_reference","amount_minor","currency","status","provider_transaction_id","created_at","confirmed_at"];
+    const columns = ["id","provider","merchant_reference","amount_minor","currency","status","provider_transaction_id","provider_checkout_request_id","provider_receipt","provider_order_tracking_id","created_at","confirmed_at"];
     const lines = [columns.join(","), ...result.rows.map((row) => columns.map((key) => `"${safe(row[key])}"`).join(","))];
     res.setHeader("content-type", "text/csv; charset=utf-8");
     res.setHeader("content-disposition", "attachment; filename=\"mobiwave-transactions.csv\"");

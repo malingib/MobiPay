@@ -51,9 +51,18 @@ function App() {
   async function submitAuth(event: React.FormEvent) {
     event.preventDefault(); if (!authClient) return; setBusy(true); setError(""); setNotice("");
     try {
-      const result = mode === "sign-up" ? await authClient.signUp.email({ email, password, name }) : await authClient.signIn.email({ email, password });
-      if (result.error) throw new Error(result.error.message);
-      if (result.data?.user) setUser(result.data.user); else setNotice("Account submitted. Complete any email verification, then sign in.");
+      if (mode === "sign-up") {
+        const result = await authClient.signUp.email({ email, password, name });
+        if (result.error) throw new Error(result.error.message);
+        const session = await authClient.getSession();
+        if (!session.error && session.data?.user) setUser(session.data.user);
+        else { setMode("sign-in"); setNotice("Account created. Complete any email verification, then sign in."); }
+      } else {
+        const result = await authClient.signIn.email({ email, password });
+        if (result.error) throw new Error(result.error.message);
+        if (result.data?.user) setUser(result.data.user);
+        else setNotice("Sign-in did not create an active session. Check your email verification and try again.");
+      }
     } catch (e) { setError(e instanceof Error ? e.message : "Authentication failed."); } finally { setBusy(false); }
   }
   async function createWorkspace(event: React.FormEvent) {

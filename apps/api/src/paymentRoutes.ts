@@ -4,6 +4,8 @@ import { z } from "zod";
 import { getPool } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
+import { reconcileRecords } from "./reconciliation.js";
+import { parseStatementCsv, sha256Statement } from "./statementImport.js";
 
 const router = Router();
 const tenantIdSchema = z.string().uuid();
@@ -18,6 +20,11 @@ const createTransactionSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/).default("KES"),
   payerReference: z.string().trim().max(120).optional(),
   description: z.string().trim().max(500).optional(),
+});
+const statementImportSchema = z.object({
+  provider: z.enum(["daraja","pesapal","bank","manual"]),
+  sourceName: z.string().trim().min(1).max(255),
+  csvContent: z.string().min(1).max(1_800_000),
 });
 const webhookEndpointSchema = z.object({
   url: z.string().url().max(2048),
@@ -42,6 +49,78 @@ function validTenantParam(value: string) {
 }
 
 router.use(requireAuth);
+
+
+router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
+  const parsed=statementImportSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.error.flatten()});
+  let rows;
+  try { rows=parseStatementCsv(parsed.data.csvContent); }
+  catch(error) { return res.status(400).json({error:"invalid_statement_csv",message:error instanceof Error ? error.message : "CSV could not be parsed"}); }
+  try {
+    const member=await membership(req.authUser!.id,tenantId);
+    if (!member) return res.status(404).json({error:"tenant_not_found"});
+    if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    const sourceHash=sha256Statement(parsed.data.csvContent);
+    const client=await getPool().connect();
+    try {
+      await client.query("begin");
+      const created=await client.query(
+        "insert into public.payment_reconciliation_runs(tenant_id,provider,source_name,source_sha256,status,rows_total,created_by) values($1,$2,$3,$4,'processing',$5,$6) on conflict (tenant_id,provider,source_sha256) do nothing returning id",
+        [tenantId,parsed.data.provider,parsed.data.sourceName,sourceHash,rows.length,req.authUser!.id],
+      );
+      if (!created.rows[0]) {
+        const existing=await client.query("select id,status,rows_total,rows_matched,rows_unmatched,rows_exception,created_at from public.payment_reconciliation_runs where tenant_id=$1 and provider=$2 and source_sha256=$3",[tenantId,parsed.data.provider,sourceHash]);
+        await client.query("commit");
+        return res.status(200).json({run:existing.rows[0],idempotentReplay:true});
+      }
+      const runId=created.rows[0].id as string;
+      const ledger=await client.query(
+        "select id,provider,coalesce(provider_receipt,provider_order_tracking_id,provider_checkout_request_id,provider_transaction_id) as provider_reference,merchant_reference,amount_minor,currency from public.payment_transactions where tenant_id=$1 and provider=$2 order by created_at desc limit 20000",
+        [tenantId,parsed.data.provider],
+      );
+      const matches=reconcileRecords(
+        ledger.rows.map((row:any)=>({id:String(row.id),provider:String(row.provider),providerReference:row.provider_reference,merchantReference:String(row.merchant_reference),amountMinor:Number(row.amount_minor),currency:String(row.currency)})),
+        rows.map((row:any,index:number)=>({id:String(index),provider:parsed.data.provider,providerReference:row.providerReference || null,merchantReference:row.merchantReference || null,amountMinor:row.amountMinor,currency:row.currency})),
+      );
+      let matched=0,unmatched=0,exceptions=0;
+      for (let index=0;index<rows.length;index++) {
+        const row=rows[index]!;
+        const result=matches[index]!;
+        const transactionId=result.paymentId ?? null;
+        await client.query(
+          "insert into public.payment_reconciliation_records(run_id,tenant_id,provider,provider_reference,merchant_reference,amount_minor,currency,occurred_at,raw_record,reconciliation_status,transaction_id,reason) values($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12)",
+          [runId,tenantId,parsed.data.provider,row.providerReference || null,row.merchantReference || null,row.amountMinor,row.currency,row.occurredAt,row.raw,result.status,transactionId,result.reason],
+        );
+        if (result.status==="matched") matched++;
+        else {
+          exceptions++;
+          if (result.status==="unmatched") unmatched++;
+          const exceptionType=result.status==="amount_mismatch" ? "amount_mismatch" : result.status==="duplicate" ? "duplicate" : result.status==="unmatched" ? "unmatched" : "other";
+          await client.query(
+            "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,$3,$4,$5,$6::jsonb)",
+            [tenantId,transactionId,parsed.data.provider,row.providerReference || null,exceptionType,JSON.stringify({runId,rowNumber:index+2,status:result.status,reason:result.reason,merchantReference:row.merchantReference,amountMinor:row.amountMinor,currency:row.currency})],
+          );
+        }
+      }
+      const updated=await client.query(
+        "update public.payment_reconciliation_runs set status='completed',rows_matched=$1,rows_unmatched=$2,rows_exception=$3,completed_at=now() where id=$4 returning id,status,rows_total,rows_matched,rows_unmatched,rows_exception,created_at,completed_at",
+        [matched,unmatched,exceptions,runId],
+      );
+      await client.query(
+        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'reconciliation.import.completed','reconciliation_run',$3,$4::jsonb)",
+        [tenantId,req.authUser!.id,runId,JSON.stringify({provider:parsed.data.provider,sourceName:parsed.data.sourceName,sourceSha256:sourceHash,rowsTotal:rows.length,rowsMatched:matched,rowsUnmatched:unmatched,rowsException:exceptions})],
+      );
+      await client.query("commit");
+      return res.status(201).json({run:updated.rows[0],idempotentReplay:false});
+    } catch(error) {
+      await client.query("rollback").catch(()=>undefined);
+      throw error;
+    } finally { client.release(); }
+  } catch(error) { return next(error); }
+});
 
 router.get("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? "");

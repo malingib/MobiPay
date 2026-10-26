@@ -148,7 +148,7 @@ for each row execute function public.enforce_payment_status_transition();
 -- Transactional outbox: enqueue a merchant event in the same database transaction
 -- that records the terminal payment state. Delivery is performed asynchronously.
 create or replace function public.enqueue_payment_merchant_webhooks()
-returns trigger language plpgsql security definer set search_path = public as $
+returns trigger language plpgsql security definer set search_path = public as $body$
 declare
   v_event_name text;
   endpoint record;
@@ -197,7 +197,7 @@ begin
   end loop;
   return new;
 end;
-$$;
+$body$;
 
 drop trigger if exists payment_transaction_webhook_outbox on public.payment_transactions;
 create trigger payment_transaction_webhook_outbox

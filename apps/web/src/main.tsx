@@ -4,7 +4,7 @@ import { createAuthClient } from "@neondatabase/auth";
 import "./styles.css";
 
 const authUrl = import.meta.env.VITE_NEON_AUTH_URL as string | undefined;
-const apiBase = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "").replace(/\/$/, "");
+const apiBase = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || window.location.origin).replace(/\/$/, "");
 const authClient = authUrl ? createAuthClient(authUrl) : null;
 type Tenant = { id: string; name: string; slug: string; role: string };
 type Connection = { provider: string; connection_status: string; enabled: boolean; environment: string; last_tested_at?: string | null };

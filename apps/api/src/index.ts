@@ -1,4 +1,6 @@
 import app from "./app.js";
+import { processDueMerchantWebhookDeliveries } from "./merchantWebhookWorker.js";
+import { processRetryableProviderEvents } from "./providerEventRecoveryWorker.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const server = app.listen(port, () => {
@@ -17,3 +19,22 @@ function shutdown(signal: string) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+if (process.env.MERCHANT_WEBHOOK_WORKER_ENABLED === "true") {
+  let running = false;
+  const worker = setInterval(async () => {
+    if (running) return;
+    running = true;
+    try {
+      const recovered = await processRetryableProviderEvents(10);
+      const result = await processDueMerchantWebhookDeliveries(20);
+      if (recovered.retried > 0 || recovered.exceptions > 0) console.warn("Provider event recovery summary.", recovered);
+      if (result.deadLettered > 0) console.error(`Merchant webhook deliveries dead-lettered: ${result.deadLettered}`);
+    } catch (error) {
+      console.error("Merchant webhook worker iteration failed.", error instanceof Error ? error.message : "unknown error");
+    } finally {
+      running = false;
+    }
+  }, 15_000);
+  worker.unref();
+}

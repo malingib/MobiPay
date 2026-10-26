@@ -127,11 +127,11 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
     const eventId=callback.CheckoutRequestID;
     const tx=await getPool().query("select id,amount_minor,status from public.payment_transactions where tenant_id=$1 and provider='daraja' and provider_checkout_request_id=$2",[tenantId,eventId]);
     if (!tx.rows[0]) {
-      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status,last_error) values($1,'daraja',$2,'stk_callback',$3,'retry','Callback arrived before checkout ID was attached to a transaction') on conflict do nothing",[tenantId,eventId,sha256Payload(req.body)]);
+      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,last_error) values($1,'daraja',$2,'stk_callback',$3,$4::jsonb,'retry','Callback arrived before checkout ID was attached to a transaction') on conflict do nothing",[tenantId,eventId,sha256Payload(req.body),JSON.stringify(req.body)]);
       return res.status(200).json({ResultCode:0,ResultDesc:"Accepted for review"});
     }
     const row=tx.rows[0];
-    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status,processing_attempts) values($1,'daraja',$2,'stk_callback',$3,'received',1) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,last_error=null where payment_provider_events.processing_status='retry' returning id",[tenantId,eventId,sha256Payload(req.body)]);
+    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at) values($1,'daraja',$2,'stk_callback',$3,$4::jsonb,'received',1,now()) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,processing_started_at=now(),last_error=null,payload=excluded.payload where payment_provider_events.processing_status='retry' returning id",[tenantId,eventId,sha256Payload(req.body),JSON.stringify(req.body)]);
     if (!event.rows[0]) return res.status(200).json({ResultCode:0,ResultDesc:"Duplicate accepted"});
     let verified=false;
     let callbackAmount:number|undefined;
@@ -147,12 +147,12 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
     } catch { verified=false; }
     if (verified) {
       await getPool().query("update public.payment_transactions set status='succeeded',provider_status='status_query_verified',provider_receipt=$1,confirmed_at=coalesce(confirmed_at,now()),updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending','unknown')",[receipt,row.id,tenantId]);
-      await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
+      await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now(),processing_started_at=null,last_error=null where id=$1",[event.rows[0].id]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,metadata) values($1,'daraja.callback.verified','transaction',$2,$3::jsonb)",[tenantId,row.id,JSON.stringify({receipt})]);
     } else {
       await getPool().query("update public.payment_transactions set status='unknown',provider_status='callback_received_unverified',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
       await getPool().query("insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'daraja',$3,'status_mismatch',$4::jsonb)",[tenantId,row.id,eventId,JSON.stringify({reason:"Callback could not be independently verified; manual review required."})]);
-      await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
+      await getPool().query("update public.payment_provider_events set processing_status='retry',processing_started_at=null,last_error='Provider status could not be verified' where id=$1",[event.rows[0].id]);
     }
     return res.status(200).json({ResultCode:0,ResultDesc:"Accepted"});
   } catch(error) { return next(error); }
@@ -166,11 +166,11 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
   try {
     const tx=await getPool().query("select id,amount_minor,currency,status from public.payment_transactions where tenant_id=$1 and provider='pesapal' and provider_order_tracking_id=$2",[tenantId,trackingId]);
     if (!tx.rows[0]) {
-      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status,last_error) values($1,'pesapal',$2,'ipn_status_query',$3,'retry','Notification arrived before tracking ID was attached to a transaction') on conflict do nothing",[tenantId,trackingId,sha256Payload({query:req.query})]);
+      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,last_error) values($1,'pesapal',$2,'ipn_status_query',$3,$4::jsonb,'retry','Notification arrived before tracking ID was attached to a transaction') on conflict do nothing",[tenantId,trackingId,sha256Payload({query:req.query}),JSON.stringify({query:req.query})]);
       return res.status(200).send("Accepted for review");
     }
     const row=tx.rows[0];
-    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,processing_status,processing_attempts) values($1,'pesapal',$2,'ipn_status_query',$3,'received',1) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,last_error=null where payment_provider_events.processing_status='retry' returning id",[tenantId,trackingId,sha256Payload({query:req.query})]);
+    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at) values($1,'pesapal',$2,'ipn_status_query',$3,$4::jsonb,'received',1,now()) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,processing_started_at=now(),last_error=null,payload=excluded.payload where payment_provider_events.processing_status='retry' returning id",[tenantId,trackingId,sha256Payload({query:req.query}),JSON.stringify({query:req.query})]);
     if (!event.rows[0]) return res.status(200).send("Duplicate accepted");
     try {
       const status=await queryPesapalStatus(trackingId);

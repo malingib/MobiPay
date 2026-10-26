@@ -115,7 +115,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone}, providerCredentials);
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3",[provider.orderTrackingId,provider.redirectUrl,transactionId]);
+      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4",[provider.orderTrackingId,provider.redirectUrl,transactionId,tenantId]);
       await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {

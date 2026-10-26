@@ -70,7 +70,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     finally { client.release(); }
 
     const callbackToken = process.env.DARAJA_CALLBACK_TOKEN;
-    if (!callbackToken) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
+    if (!callbackToken || callbackToken.length < 32) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
       const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl});
@@ -120,7 +120,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
 
 router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? ""), expected=process.env.DARAJA_CALLBACK_TOKEN;
-  if (!idSchema.safeParse(tenantId).success || !expected || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
+  if (!idSchema.safeParse(tenantId).success || !expected || expected.length < 32 || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
   const callback=(req.body as any)?.Body?.stkCallback;
   if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
   try {

@@ -8,7 +8,7 @@ export default async function handler(req: VercelRequest, res: ServerResponse) {
   const incoming = new URL(req.url ?? "/", "https://internal.invalid");
   const path = incoming.searchParams.get("__path");
   if (path) {
-    if (path !== "/api/v1" && !path.startsWith("/api/v1/")) {
+    if (path !== "/health" && path !== "/ready" && path !== "/api/v1" && !path.startsWith("/api/v1/")) {
       res.statusCode = 400;
       res.end("Invalid API path");
       return;

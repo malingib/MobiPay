@@ -23,7 +23,7 @@ const pesapalSchema = z.object({
 });
 
 async function getMembership(userId: string, tenantId: string) {
-  const r = await getPool().query("select role from public.payment_tenant_memberships where tenant_id=$1 and user_id=$2 and status='active'", [tenantId,userId]);
+  const r = await getPool().query("select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.tenant_id=$1 and m.user_id=$2 and m.status='active' and t.status='active'", [tenantId,userId]);
   return r.rows[0] as { role: string } | undefined;
 }
 function tokenMatches(supplied: string, expected: string) {

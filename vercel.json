@@ -4,14 +4,10 @@
   "buildCommand": "npm run build",
   "outputDirectory": "apps/web/dist",
   "rewrites": [
-    {
-      "source": "/api/v1",
-      "destination": "/api/index?__path=/api/v1"
-    },
-    {
-      "source": "/api/v1/(.*)",
-      "destination": "/api/index?__path=/api/v1/$1"
-    }
+    { "source": "/health", "destination": "/api/index?__path=/health" },
+    { "source": "/ready", "destination": "/api/index?__path=/ready" },
+    { "source": "/api/v1", "destination": "/api/index?__path=/api/v1" },
+    { "source": "/api/v1/(.*)", "destination": "/api/index?__path=/api/v1/$1" }
   ],
   "functions": {
     "api/index.ts": {

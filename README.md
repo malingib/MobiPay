@@ -4,7 +4,7 @@ MobiWave Payments is a Kenya-focused multi-tenant payments visibility and reconc
 
 ## Current implementation
 
-- React/Vite sandbox console; its displayed metrics remain illustrative demo data.
+- React/Vite sandbox operations console. Dashboard metrics, transaction history, provider connection state, reconciliation exceptions, and webhook endpoints are loaded from the Neon-backed API; empty states are shown when the database has no records.
 - TypeScript/Express API with helmet, CORS allowlist, request-size limits, rate limiting, health and database-readiness endpoints.
 - JWT verification through configured issuer, audience, and remote JWKS.
 - Neon PostgreSQL migrations for tenants, memberships, provider account references, transactions, idempotency, provider events, reconciliation exceptions, audit history, provider-specific identifiers, reconciliation run storage, and merchant webhook outbox.
@@ -67,6 +67,6 @@ Provider credentials are scoped to a tenant and are not shared between merchants
 - Add alerts, backups, restore tests, structured monitoring, and incident-response procedures.
 - Obtain provider and Kenyan legal/regulatory confirmation before live collection or fund movement.
 
-A durable reconciliation-run schema is present, but statement-file parsing/import API, scheduled ingestion and review UI remain follow-up work. Early callbacks are persisted with their payloads and retried by the optional provider-event recovery worker.
+Statement CSV parsing/import API and the reconciliation exception review UI are implemented, including content-hash deduplication and conservative matching. Recurring statement ingestion remains pending until each bank/provider integration, credentials, polling schedule, and reliable scheduled worker are configured. Provider-event recovery and merchant webhook delivery worker functions exist, but a durable production scheduler/worker deployment must be configured before relying on retries or webhook delivery. Early callbacks are persisted with their payloads for recovery.
 
 The platform does not hold customer funds by design. Never store card data, M-Pesa PINs, bank passwords, or live provider secrets in source control.

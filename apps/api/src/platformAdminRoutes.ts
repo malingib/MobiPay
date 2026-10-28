@@ -47,14 +47,11 @@ router.get("/tenants", async (req, res, next) => {
   try {
     const result = await getPool().query(`
       select t.id,t.name,t.slug,t.status,t.created_at,
-        count(distinct m.user_id)::int as members,
-        count(distinct tx.id)::int as transactions,
-        coalesce(sum(tx.amount_minor) filter (where tx.status='succeeded'),0)::text as succeeded_amount_minor
+        (select count(*)::int from public.payment_tenant_memberships m where m.tenant_id=t.id and m.status='active') as members,
+        (select count(*)::int from public.payment_transactions tx where tx.tenant_id=t.id) as transactions,
+        coalesce((select sum(tx.amount_minor) from public.payment_transactions tx where tx.tenant_id=t.id and tx.status='succeeded'),0)::text as succeeded_amount_minor
       from public.payment_tenants t
-      left join public.payment_tenant_memberships m on m.tenant_id=t.id
-      left join public.payment_transactions tx on tx.tenant_id=t.id
       where ($1='' or t.name ilike '%'||$1||'%' or t.slug ilike '%'||$1||'%')
-      group by t.id
       order by t.created_at desc limit 250`, [q]);
     return res.json({ tenants: result.rows });
   } catch (error) { return next(error); }

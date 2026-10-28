@@ -5,6 +5,7 @@ import rateLimit from "express-rate-limit";
 import paymentRoutes from "./paymentRoutes.js";
 import providerRoutes from "./providerRoutes.js";
 import providerConnectionRoutes from "./providerConnections.js";
+import platformAdminRoutes from "./platformAdminRoutes.js";
 import { getPool } from "./db.js";
 
 export function createApp() {
@@ -68,6 +69,7 @@ export function createApp() {
 
   // Public provider webhooks are registered first; business API routes require JWT auth.
   app.use("/api/v1", providerRoutes);
+  app.use("/api/v1/platform/admin", platformAdminRoutes);
   app.use("/api/v1", providerConnectionRoutes);
   app.use("/api/v1", paymentRoutes);
 

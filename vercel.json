@@ -7,7 +7,9 @@
     { "source": "/health", "destination": "/api/index?__path=/health" },
     { "source": "/ready", "destination": "/api/index?__path=/ready" },
     { "source": "/api/v1", "destination": "/api/index?__path=/api/v1" },
-    { "source": "/api/v1/(.*)", "destination": "/api/index?__path=/api/v1/$1" }
+    { "source": "/api/v1/(.*)", "destination": "/api/index?__path=/api/v1/$1" },
+    { "source": "/admin", "destination": "/index.html" },
+    { "source": "/admin/(.*)", "destination": "/index.html" }
   ],
   "functions": {
     "api/index.ts": {

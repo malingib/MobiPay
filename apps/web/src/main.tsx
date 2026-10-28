@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createAuthClient } from "@neondatabase/auth";
 import "./styles.css";
+import AdminApp from "./admin.js";
 
 const authUrl = import.meta.env.VITE_NEON_AUTH_URL as string | undefined;
 const apiBase = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || window.location.origin).replace(/\/$/, "");
@@ -229,4 +230,4 @@ function TransactionTable({ items }: { items: Tx[] }) {
   if (!items.length) return <Empty>No transactions yet. Initiate a sandbox checkout to create a real database record.</Empty>;
   return <div className="table-wrap"><table><thead><tr><th>REFERENCE</th><th>PROVIDER</th><th>AMOUNT</th><th>STATUS</th><th>PROVIDER RECEIPT</th><th>CREATED</th></tr></thead><tbody>{items.map((t) => <tr key={t.id}><td><strong>{t.merchant_reference}</strong><small className="table-sub">{t.payer_reference || t.id}</small></td><td>{label(t.provider)}</td><td className="amount">{cash(Number(t.amount_minor), t.currency || "KES")}</td><td><Status value={t.status}/></td><td>{t.provider_receipt || "—"}</td><td>{stamp(t.created_at)}</td></tr>)}</tbody></table></div>;
 }
-createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{window.location.pathname.startsWith("/admin") ? <AdminApp /> : <App />}</React.StrictMode>);

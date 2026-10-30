@@ -10,16 +10,16 @@
 
 ## Authentication and authorization — current baseline and required boundary
 
-The current branch authenticates merchant and platform-admin requests with Neon Auth JWTs. Platform-admin access is additionally restricted by `PLATFORM_ADMIN_EMAILS`. This is the existing implementation, not the final separation requirement.
+Merchant APIs authenticate with Neon Auth JWTs. Platform administration now uses a separate username/password exchange and an HMAC-signed, eight-hour HTTP-only `mobiwave_platform_admin` cookie. The admin session is independent of Neon Auth and does not grant merchant API access.
 
 The required platform boundary is:
 - Merchant authentication remains scoped to the merchant identity/workspace and its membership. Merchant credentials must never authorize platform-wide data access.
 - Platform administration must use its own signed, HTTP-only `mobiwave_platform_admin` session, configured by `ADMIN_USERNAME`, `ADMIN_PASSWORD`, optional `PLATFORM_ADMIN_NAME`, and `PLATFORM_ADMIN_SESSION_SECRET`; session lifetime is eight hours.
-- Platform endpoints must be isolated under `/api/admin/*`, with their own authentication middleware and rate-limit bucket. Merchant endpoints remain under `/api/v1/*`.
-- The admin frontend must call a dedicated admin API client and must not reuse merchant tokens or merchant API clients.
+- Platform endpoints are isolated under `/api/admin/*`, with their own cookie-session middleware and a dedicated login rate limit. Merchant endpoints remain under `/api/v1/*`.
+- The admin frontend uses a dedicated cookie-based API client (`credentials: include`) and does not import Neon Auth or reuse merchant tokens.
 - Platform actions must append an immutable platform-admin audit record. Administrative activation/exception actions must not silently alter PSP settlement state or rotate provider credentials.
 
-Do not claim the final boundary is implemented until the API, frontend, tests, and deployment configuration all enforce it.
+The API, frontend, Vercel rewrite, and migration now implement this boundary. Configure `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `PLATFORM_ADMIN_SESSION_SECRET` (at least 32 characters), and optional `PLATFORM_ADMIN_NAME` before sign-in. Apply migration 004 before using admin actions. Automated tests and a live Neon verification remain deployment gates.
 
 ## Tenant isolation
 

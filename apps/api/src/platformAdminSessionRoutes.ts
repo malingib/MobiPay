@@ -1,11 +1,13 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { clearAdminSessionCookie, createAdminSession, requirePlatformAdmin, setAdminSessionCookie, verifyAdminCredentials } from "./platformAdminSession.js";
 
 const router = Router();
+const loginLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "admin_login_rate_limited" } });
 const loginSchema = z.object({ username: z.string().trim().min(1).max(128), password: z.string().min(1).max(1024) });
 
-router.post("/session", (req, res) => {
+router.post("/session", loginLimiter, (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_credentials" });
   try {

@@ -6,7 +6,8 @@ MobiWave Payments is a Kenya-focused multi-tenant payments visibility and reconc
 
 - React/Vite sandbox operations console. Dashboard metrics, transaction history, provider connection state, reconciliation exceptions, and webhook endpoints are loaded from the Neon-backed API; empty states are shown when the database has no records.
 - TypeScript/Express API with helmet, CORS allowlist, request-size limits, rate limiting, health and database-readiness endpoints.
-- JWT verification through configured issuer, audience, and remote JWKS.
+- Merchant JWT verification through configured issuer, audience, and remote JWKS.
+- Separate platform-admin console authentication using `ADMIN_USERNAME` / `ADMIN_PASSWORD`, an HMAC-signed eight-hour HTTP-only cookie, dedicated `/api/admin/*` routes, login rate limiting, and append-only platform audit logs. Platform admin does not reuse merchant Neon Auth sessions.
 - Neon PostgreSQL migrations for tenants, memberships, provider account references, transactions, idempotency, provider events, reconciliation exceptions, audit history, provider-specific identifiers, reconciliation run storage, and merchant webhook outbox.
 - Tenant membership and role checks for transaction APIs and exception resolution.
 - Transaction CSV exports with spreadsheet-formula injection protection.
@@ -25,19 +26,22 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 - `DATABASE_URL` — dedicated Neon PostgreSQL connection string.
 - `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` — base64-encoded 32-byte key for AES-256-GCM encryption of merchant-owned Daraja/Pesapal credentials. Generate with `openssl rand -base64 32`; store only in deployment secrets and preserve it securely. If lost, stored credentials cannot be decrypted.
 - `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration.
+- `ADMIN_USERNAME` and `ADMIN_PASSWORD` — dedicated platform-admin credentials; do not reuse merchant credentials.
+- `PLATFORM_ADMIN_SESSION_SECRET` — random secret of at least 32 characters. Generate with `openssl rand -base64 48`.
+- Optional `PLATFORM_ADMIN_NAME` — display name for the platform administrator.
 - A long random `DARAJA_CALLBACK_TOKEN`; each merchant supplies their own Daraja sandbox credentials through the authenticated provider-connections API.
 - Each merchant supplies their own Pesapal sandbox credentials and registered IPN ID through the authenticated provider-connections API.
 - `PUBLIC_API_BASE_URL` — public HTTPS API base URL used to construct provider callback URLs.
 
 ## Migration and operational requirements
 
-Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, then `neon/migrations/003_merchant_provider_security.sql` to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete.
+Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, then `neon/migrations/003_merchant_provider_security.sql`, and finally `neon/migrations/004_platform_admin_audit.sql` to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
 
 ## Deployment configuration
 
 The dedicated Neon project `mobiwave-paymenrs` is connected to the MobiPay Vercel project. Migrations 001–003 are applied to the production branch and the required payment tables, provider-encryption columns, and read policies have been verified. A separate `mobipay-preview` Neon branch is used for preview deployments so preview testing does not write to production data.
 
-The Vercel project builds the React/Vite frontend and exposes the Express API through `api/[...path].ts`. Keep `DATABASE_URL`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, and `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` in server-side deployment secrets. Do not put database credentials or encryption keys in `VITE_*` variables. The frontend uses the same deployment origin for API calls when `VITE_API_BASE_URL` is blank.
+The Vercel project builds the React/Vite frontend and exposes the Express API through `api/[...path].ts`. Keep `DATABASE_URL`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `PROVIDER_CREDENTIALS_ENCRYPTION_KEY`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `PLATFORM_ADMIN_SESSION_SECRET` in server-side deployment secrets. Do not put database credentials or encryption keys in `VITE_*` variables. The frontend uses the same deployment origin for API calls when `VITE_API_BASE_URL` is blank.
 
 ## Neon Auth merchant onboarding
 

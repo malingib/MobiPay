@@ -11,18 +11,18 @@ router.use(requirePlatformAdmin);
 router.get("/overview", async (_req, res, next) => {
   try {
     const [tenants, transactions, providers, exceptions] = await Promise.all([
-      getPool().query(\`select count(*)::int as total,
+      getPool().query(`select count(*)::int as total,
         count(*) filter (where status='active')::int as active,
-        count(*) filter (where status='suspended')::int as suspended from public.payment_tenants\`),
-      getPool().query(\`select count(*)::int as total,
+        count(*) filter (where status='suspended')::int as suspended from public.payment_tenants`),
+      getPool().query(`select count(*)::int as total,
         count(*) filter (where status='succeeded')::int as succeeded,
         count(*) filter (where status='pending')::int as pending,
         count(*) filter (where status='failed')::int as failed,
         coalesce(sum(amount_minor) filter (where status='succeeded'),0)::text as succeeded_amount_minor
-        from public.payment_transactions\`),
-      getPool().query(\`select provider, connection_status, count(*)::int as total
-        from public.payment_provider_configs group by provider, connection_status order by provider, connection_status\`),
-      getPool().query(\`select count(*)::int as open from public.payment_reconciliation_exceptions where status not in ('resolved','dismissed')\`),
+        from public.payment_transactions`),
+      getPool().query(`select provider, connection_status, count(*)::int as total
+        from public.payment_provider_configs group by provider, connection_status order by provider, connection_status`),
+      getPool().query(`select count(*)::int as open from public.payment_reconciliation_exceptions where status not in ('resolved','dismissed')`),
     ]);
     return res.json({ tenants: tenants.rows[0], transactions: transactions.rows[0], providers: providers.rows, exceptions: exceptions.rows[0] });
   } catch (error) { return next(error); }
@@ -30,25 +30,25 @@ router.get("/overview", async (_req, res, next) => {
 router.get("/tenants", async (req, res, next) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
   try {
-    const result = await getPool().query(\`
+    const result = await getPool().query(`
       select t.id,t.name,t.slug,t.status,t.created_at,
         (select count(*)::int from public.payment_tenant_memberships m where m.tenant_id=t.id and m.status='active') as members,
         (select count(*)::int from public.payment_transactions tx where tx.tenant_id=t.id) as transactions,
         coalesce((select sum(tx.amount_minor) from public.payment_transactions tx where tx.tenant_id=t.id and tx.status='succeeded'),0)::text as succeeded_amount_minor
       from public.payment_tenants t
       where ($1='' or t.name ilike '%'||$1||'%' or t.slug ilike '%'||$1||'%')
-      order by t.created_at desc limit 250\`, [q]);
+      order by t.created_at desc limit 250`, [q]);
     return res.json({ tenants: result.rows });
   } catch (error) { return next(error); }
 });
 router.get("/transactions", async (req, res, next) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
   try {
-    const result = await getPool().query(\`
+    const result = await getPool().query(`
       select tx.id,tx.tenant_id,t.name as tenant_name,tx.provider,tx.merchant_reference,
         tx.amount_minor,tx.currency,tx.status,tx.provider_receipt,tx.provider_status,tx.created_at,tx.confirmed_at
       from public.payment_transactions tx join public.payment_tenants t on t.id=tx.tenant_id
-      order by tx.created_at desc limit $1\`, [limit]);
+      order by tx.created_at desc limit $1`, [limit]);
     return res.json({ transactions: result.rows });
   } catch (error) { return next(error); }
 });

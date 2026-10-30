@@ -15,7 +15,7 @@
     "test": "npm run test --workspace @mobiwave/api"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "overrides": {
     "zod": "4.6.7"

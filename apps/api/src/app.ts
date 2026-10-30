@@ -14,6 +14,8 @@ export function createApp() {
   const allowedOrigins = (process.env.CORS_ORIGINS ?? "http://localhost:5173")
     .split(",").map((origin) => origin.trim()).filter(Boolean);
   app.disable("x-powered-by");
+  // Vercel terminates the client connection at one trusted proxy hop. This lets express-rate-limit use the real client IP safely.
+  app.set("trust proxy", 1);
   app.use(helmet());
   app.use(cors({
     origin(origin, callback) {

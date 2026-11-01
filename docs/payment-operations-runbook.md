@@ -15,7 +15,7 @@ This application remains sandbox-only. Live Daraja and Pesapal operations are de
    - `neon/migrations/004_platform_admin_audit.sql`
 4. Verify the expected tables, indexes, constraints, policies and triggers, including `platform_admin_audit_logs` and its append-only trigger.
 5. Run `GET /ready` against the intended deployment and confirm it reports database connectivity.
-6. Run the automated checks on Node.js 22: `npm install`, `npm run typecheck`, `npm test`, and `npm run build`.
+6. Run the automated checks on Node.js 22: `npm install`, `npm run typecheck`, `npm test`, and `npm run build`. The MobiPay Vercel project is configured to gate deployments on `npm run typecheck && npm test && npm run build`; verify that the deployment logs show all three commands completing successfully.
 
 Migrations are not applied automatically by the API. Apply them deliberately through the database owner/approved migration workflow. Do not infer migration state from repository files or a successful frontend deployment. The repository currently has no committed root `package-lock.json`; until a lockfile is generated, reviewed and committed, use `npm install` for verification and treat dependency resolution as non-reproducible.
 

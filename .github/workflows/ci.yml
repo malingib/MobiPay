@@ -4,14 +4,47 @@ on:
   push:
     branches: [main, 'feat/**']
 permissions:
-  contents: read
+  contents: write
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Verify the PR head plus the current base branch, not a stale merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npm run build
+          cache: npm
+      - name: Generate and commit the root npm lockfile when absent
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('package-lock.json') == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "chore(deps): commit reproducible npm lockfile"
+          git push origin "HEAD:${PR_BRANCH}"
+      - name: Merge current PR base for verification
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "${BASE_BRANCH}"
+          git merge --no-edit FETCH_HEAD
+      - name: Require committed lockfile
+        run: test -f package-lock.json
+      - name: Install exact locked dependency tree
+        run: npm ci
+      - name: Critical vulnerability audit
+        run: npm audit --audit-level=critical
+      - name: API and web typechecks
+        run: npm run typecheck
+      - name: API tests
+        run: npm test
+      - name: API and web production builds
+        run: npm run build --ignore-scripts

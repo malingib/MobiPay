@@ -41,8 +41,9 @@ function App() {
 
   const token = useCallback(async () => {
     if (!authClient) throw new Error("Neon Auth is not configured.");
-    const jwt = await authClient.getJWTToken?.();
-    if (!jwt) throw new Error("Session expired. Sign in again.");
+    const result = await authClient.getSession();
+    const jwt = result.data?.session?.token;
+    if (result.error || !jwt) throw new Error(result.error?.message ?? "Session expired. Sign in again.");
     return jwt;
   }, []);
   const api = useCallback(async (path: string, init: RequestInit = {}) => {

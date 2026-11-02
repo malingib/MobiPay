@@ -16,7 +16,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - name: Generate and commit the root npm lockfile when absent
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('package-lock.json') == ''
         env:

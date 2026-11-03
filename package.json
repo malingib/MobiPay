@@ -13,12 +13,15 @@
     "build": "npm run build --workspace @mobiwave/api && npm run build --workspace @mobiwave/web",
     "typecheck": "npm run typecheck --workspace @mobiwave/api && npm run typecheck --workspace @mobiwave/web",
     "test": "npm run test --workspace @mobiwave/api",
-    "prebuild": "npm run typecheck && npm test"
+    "prebuild": "npm audit --audit-level=critical && npm run typecheck && npm test"
   },
   "engines": {
     "node": "22.x"
   },
   "overrides": {
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "better-auth": "1.7.15",
+    "@better-auth/drizzle-adapter": "1.7.15",
+    "@react-email/render": "2.2.0"
   }
 }

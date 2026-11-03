@@ -41,12 +41,13 @@ function App() {
 
   const token = useCallback(async () => {
     if (!authClient) throw new Error("Neon Auth is not configured.");
-    const result = await authClient.getSession();
-    // Neon Auth's adapter replaces Better Auth's opaque session token with
-    // the signed JWT from the set-auth-jwt response header.
-    const jwt = result.data?.session?.token;
+    // Managed Neon Auth exposes its short-lived, signed API JWT through
+    // token(). getSession().data.session.token is the opaque session token,
+    // not the JWT accepted by the API's JWKS verifier.
+    const result = await authClient.token();
+    const jwt = result.data?.token;
     if (result.error || !jwt || jwt.split(".").length !== 3) {
-      throw new Error(result.error?.message ?? "Session expired or JWT unavailable. Sign in again.");
+      throw new Error(result.error?.message ?? "Session expired or API token unavailable. Sign in again.");
     }
     return jwt;
   }, []);

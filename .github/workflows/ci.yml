@@ -35,6 +35,8 @@ jobs:
         env:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "${BASE_BRANCH}"
           git merge --no-edit FETCH_HEAD
       - name: Require committed lockfile

@@ -1,4 +1,3 @@
-import { getPool } from "./db.js";
 import { queryDarajaStk, queryPesapalStatus } from "./providers.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { issuePaymentWorkerCapability, newLeaseToken, withPaymentWorkerTransaction } from "./systemDb.js";
@@ -89,9 +88,9 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
           [event.transaction_id,event.tenant_id,event.provider],
         );
         if (!current.rows[0]) throw new Error("Correlated transaction no longer exists");
-        if (outcome && ["created","pending","unknown"].includes(current.rows[0].status)) {
+        if (outcome && ["pending","unknown"].includes(current.rows[0].status)) {
           await client.query(
-            "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('created','pending','unknown')",
+            "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('pending','unknown')",
             [outcome,event.provider+"_status_verified_recovery",receipt??null,event.transaction_id,event.tenant_id],
           );
           await client.query(

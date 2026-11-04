@@ -1,4 +1,6 @@
 import pg from "pg";
+import { merchantCapabilityUserId } from "./auth.js";
+import type { MerchantDatabaseCapability } from "./auth.js";
 
 const { Pool } = pg;
 let pool: pg.Pool | undefined;
@@ -21,7 +23,7 @@ export function getPool() {
  * uses set_config(..., true), so PostgreSQL clears it at transaction end before
  * the pooled connection can be reused.
  *
- * This helper is only for authenticated merchant-user operations. Provider
+ * This helper accepts only an opaque capability issued by the verified Neon Auth middleware. Provider
  * callbacks, background workers, tenant bootstrap and platform-admin work must
  * use separately designed capabilities; never pass a caller-supplied user ID
  * or tenant ID into this helper as a substitute for authenticating that actor.
@@ -30,13 +32,12 @@ export function getPool() {
  * client. Do not call pool.query() from inside the callback.
  */
 export async function withUserTransaction<T>(
-  userId: string,
+  capability: MerchantDatabaseCapability,
   operation: (client: pg.PoolClient) => Promise<T>,
   dbPool: Pick<pg.Pool, "connect"> = getPool(),
 ): Promise<T> {
-  if (typeof userId !== "string" || userId.trim().length === 0 || userId.length > 256) {
-    throw new Error("A verified user identity is required for a merchant database transaction");
-  }
+  const userId = merchantCapabilityUserId(capability);
+  if (!userId) throw new Error("A verified merchant database capability is required");
 
   const client = await dbPool.connect();
   let transactionStarted = false;

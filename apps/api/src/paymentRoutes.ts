@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getPool } from "./db.js";
+import { getPool, withUserTransaction } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
 import { reconcileRecords } from "./reconciliation.js";
@@ -37,10 +37,13 @@ const resolveSchema = z.object({
 });
 
 async function membership(userId: string, tenantId: string) {
-  const result = await getPool().query(
-    "select role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
-    [userId, tenantId],
-  );
+  return withUserTransaction(userId, async (client) => {
+    const result = await client.query(
+      "select role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
+      [userId, tenantId],
+    );
+    return result.rows[0] as { role: string } | undefined;
+  });
   return result.rows[0] as { role: string } | undefined;
 }
 
@@ -127,10 +130,10 @@ router.get("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
   if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
   try {
     if (!await membership(req.authUser!.id,tenantId)) return res.status(404).json({error:"tenant_not_found"});
-    const result=await getPool().query(
+    const result=await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select id,url,subscribed_events,enabled,created_at,updated_at from public.payment_merchant_webhook_endpoints where tenant_id=$1 order by created_at desc",
       [tenantId],
-    );
+    ));
     return res.json({endpoints:result.rows});
   } catch(error) { return next(error); }
 });
@@ -209,10 +212,10 @@ router.post("/tenants", async (req, res, next) => {
 
 router.get("/tenants", async (req, res, next) => {
   try {
-    const result = await getPool().query(
+    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select t.id,t.name,t.slug,t.status,m.role,m.created_at from public.payment_tenants t join public.payment_tenant_memberships m on m.tenant_id=t.id where m.user_id=$1 and m.status='active' and t.status='active' order by t.created_at desc",
       [req.authUser!.id],
-    );
+    ));
     return res.json({ tenants: result.rows });
   } catch (error) { return next(error); }
 });
@@ -223,10 +226,10 @@ router.get("/tenants/:tenantId/transactions", async (req, res, next) => {
   try {
     if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
-    const result = await getPool().query(
+    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select id,provider,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,merchant_reference,amount_minor,currency,status,payer_reference,description,provider_status,occurred_at,confirmed_at,created_at,updated_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit $2",
       [tenantId, limit],
-    );
+    ));
     return res.json({ transactions: result.rows });
   } catch (error) { return next(error); }
 });
@@ -272,10 +275,10 @@ router.get("/tenants/:tenantId/exceptions", async (req, res, next) => {
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
     if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await getPool().query(
+    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select id,transaction_id,provider,provider_reference,exception_type,details,status,resolution_note,resolved_by,resolved_at,created_at,updated_at from public.payment_reconciliation_exceptions where tenant_id=$1 order by created_at desc limit 200",
       [tenantId],
-    );
+    ));
     return res.json({ exceptions: result.rows });
   } catch (error) { return next(error); }
 });

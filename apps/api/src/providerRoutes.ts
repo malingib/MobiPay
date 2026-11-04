@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { withUserTransaction } from "./db.js";
 import { issueProviderSystemCapability, withProviderSystemTransaction } from "./systemDb.js";
+import type { ProviderSystemCapability } from "./systemDb.js";
 import { randomUUID } from "node:crypto";
 import { requireAuth } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
@@ -47,7 +48,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     if (!member) return res.status(404).json({ error:"tenant_not_found" });
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({ error:"insufficient_role" });
     let providerCredentials: Record<string, string>;
-    try { providerCredentials = await getTenantProviderCredentials(tenantId, "daraja") as Record<string, string>; }
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "daraja", {kind:"merchant",userId:req.authUser!.id}) as Record<string, string>; }
     catch { return res.status(409).json({ error: "daraja_not_connected", message: "Connect and verify this merchant’s Daraja sandbox credentials first." }); }
     if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") return res.status(403).json({ error:"live_payments_disabled" });
     const idempotencyKey = req.header("idempotency-key")?.trim();
@@ -94,7 +95,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     let providerCredentials: Record<string, string>;
-    try { providerCredentials = await getTenantProviderCredentials(tenantId, "pesapal") as Record<string, string>; }
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "pesapal", {kind:"merchant",userId:req.authUser!.id}) as Record<string, string>; }
     catch { return res.status(409).json({ error: "pesapal_not_connected", message: "Connect and verify this merchant’s Pesapal sandbox credentials first." }); }
     if ((process.env.PESAPAL_ENV ?? "sandbox")!=="sandbox") return res.status(403).json({error:"live_payments_disabled"});
     const key=req.header("idempotency-key")?.trim();
@@ -135,7 +136,7 @@ async function persistProviderNotification(
   eventType: string,
   payload: unknown,
   eventHash: string,
-  statusLookup: () => Promise<{ code: number; amountMinor?: number; currency?: string; receipt?: string }>,
+  statusLookup: (capability: ProviderSystemCapability) => Promise<{ code: number; amountMinor?: number; currency?: string; receipt?: string }>,
   response: { success: (message: string) => void; duplicate: () => void; unmatched: () => void },
 ) {
   const capability = issueProviderSystemCapability(provider, tenantId, eventId);
@@ -164,7 +165,7 @@ async function persistProviderNotification(
 
   let verified: { code: number; amountMinor?: number; currency?: string; receipt?: string };
   try {
-    verified = await statusLookup();
+    verified = await statusLookup(capability);
   } catch {
     await withProviderSystemTransaction(capability, async (client, scope) => {
       await client.query(

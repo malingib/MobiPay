@@ -6,7 +6,8 @@ import { withUserTransaction } from "./db.js";
 import { issueProviderSystemCapability, withProviderSystemTransaction } from "./systemDb.js";
 import type { ProviderSystemCapability } from "./systemDb.js";
 import { randomUUID } from "node:crypto";
-import { requireAuth } from "./auth.js";
+import { requireAuth, merchantCapabilityUserId } from "./auth.js";
+import type { MerchantDatabaseCapability } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
 
@@ -26,8 +27,10 @@ const pesapalSchema = z.object({
   phone: z.string().trim().max(30).optional(),
 });
 
-async function getMembership(userId: string, tenantId: string) {
-  const r = await withUserTransaction(userId, (client) => client.query("select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.tenant_id=$1 and m.user_id=$2 and m.status='active' and t.status='active'", [tenantId,userId]));
+async function getMembership(capability: MerchantDatabaseCapability, tenantId: string) {
+  const userId = merchantCapabilityUserId(capability);
+  if (!userId) throw new Error("Verified merchant capability is required");
+  const r = await withUserTransaction(capability, (client) => client.query("select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.tenant_id=$1 and m.user_id=$2 and m.status='active' and t.status='active'", [tenantId,userId]));
   return r.rows[0] as { role: string } | undefined;
 }
 function tokenMatches(supplied: string, expected: string) {
@@ -45,7 +48,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
   const parsed = stkSchema.safeParse(req.body);
   if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({ error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten() });
   try {
-    const member = await getMembership(req.authUser!.id,tenantId);
+    const member = await getMembership(req.merchantDbCapability!,tenantId);
     if (!member) return res.status(404).json({ error:"tenant_not_found" });
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({ error:"insufficient_role" });
     let providerCredentials: Record<string, string>;
@@ -55,7 +58,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const idempotencyKey = req.header("idempotency-key")?.trim();
     if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error:"idempotency_key_required" });
     const d = parsed.data;
-    const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
+    const outcome = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const inserted = await client.query(
         "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,'daraja',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider_transaction_id,status",
         [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.phone,d.description],
@@ -75,13 +78,13 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
       const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl}, providerCredentials);
-      await withUserTransaction(req.authUser!.id, async (client) => {
+      await withUserTransaction(req.merchantDbCapability!, async (client) => {
         await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_request_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
         await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
       });
       return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
     } catch {
-      await withUserTransaction(req.authUser!.id, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='initiation_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transaction.id,tenantId]));
+      await withUserTransaction(req.merchantDbCapability!, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='initiation_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transaction.id,tenantId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId:transaction.id,message:"The provider outcome is uncertain. Check status before retrying with a new idempotency key."});
     }
   } catch(error) { return next(error); }
@@ -92,7 +95,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
   const parsed = pesapalSchema.safeParse(req.body);
   if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten()});
   try {
-    const member = await getMembership(req.authUser!.id,tenantId);
+    const member = await getMembership(req.merchantDbCapability!,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     let providerCredentials: Record<string, string>;
@@ -102,7 +105,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     const key=req.header("idempotency-key")?.trim();
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
-    const outcome=await withUserTransaction(req.authUser!.id, async (client) => {
+    const outcome=await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const inserted=await client.query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
       if (inserted.rows[0]) return {row:inserted.rows[0],created:true};
       const prior=await client.query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
@@ -118,13 +121,13 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone}, providerCredentials);
-      await withUserTransaction(req.authUser!.id, async (client) => {
+      await withUserTransaction(req.merchantDbCapability!, async (client) => {
         await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4",[provider.orderTrackingId,provider.redirectUrl,transactionId,tenantId]);
         await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
       });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {
-      await withUserTransaction(req.authUser!.id, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]));
+      await withUserTransaction(req.merchantDbCapability!, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Checkout outcome is uncertain; query provider status before retrying."});
     }
   } catch(error) { return next(error); }

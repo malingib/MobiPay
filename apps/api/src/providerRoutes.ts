@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { getPool } from "./db.js";
+import { getPool, withUserTransaction } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
@@ -23,7 +23,7 @@ const pesapalSchema = z.object({
 });
 
 async function getMembership(userId: string, tenantId: string) {
-  const r = await getPool().query("select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.tenant_id=$1 and m.user_id=$2 and m.status='active' and t.status='active'", [tenantId,userId]);
+  const r = await withUserTransaction(userId, (client) => client.query("select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.tenant_id=$1 and m.user_id=$2 and m.status='active' and t.status='active'", [tenantId,userId]));
   return r.rows[0] as { role: string } | undefined;
 }
 function tokenMatches(supplied: string, expected: string) {

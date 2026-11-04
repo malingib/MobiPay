@@ -8,6 +8,22 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mobipay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mobipay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/mobipay_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +59,10 @@ jobs:
         run: test -f package-lock.json
       - name: Install exact locked dependency tree
         run: npm ci
+      - name: Apply migrations to disposable CI PostgreSQL and verify tenant constraints
+        run: |
+          for migration in neon/migrations/00[1-6]_*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f neon/tests/tenant_isolation.sql
       - name: Critical vulnerability audit
         run: npm audit --audit-level=critical
       - name: API and web typechecks

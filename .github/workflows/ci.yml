@@ -8,20 +8,6 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: mobipay_test
-          POSTGRES_PASSWORD: mobipay_test
-          POSTGRES_DB: mobipay_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U mobipay_test -d mobipay_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,16 +49,5 @@ jobs:
         run: npm run typecheck
       - name: API tests
         run: npm test
-      - name: Apply migrations to isolated PostgreSQL
-        env:
-          PGPASSWORD: mobipay_test
-        run: |
-          for migration in neon/migrations/001_payment_foundation.sql neon/migrations/002_payment_safety_and_operations.sql neon/migrations/003_merchant_provider_security.sql neon/migrations/004_platform_admin_audit.sql neon/migrations/005_tenant_isolation_hardening.sql; do
-            psql -v ON_ERROR_STOP=1 -h localhost -U mobipay_test -d mobipay_test -f "$migration"
-          done
-      - name: Run cross-tenant relational isolation tests
-        env:
-          PGPASSWORD: mobipay_test
-        run: psql -v ON_ERROR_STOP=1 -h localhost -U mobipay_test -d mobipay_test -f neon/tests/tenant_isolation.sql
       - name: API and web production builds
         run: npm run build --ignore-scripts

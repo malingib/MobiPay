@@ -30,6 +30,7 @@ begin
 end;
 $fixtures$;
 
+select set_config('test.tenant_b',(select id::text from public.payment_tenants where slug like 'rls-b-%' limit 1),true);
 set local role mobipay_test_runtime;
 select set_config('app.user_id','rls-user-a',true);
 
@@ -53,8 +54,7 @@ begin
 
   begin
     insert into public.payment_transactions(tenant_id,provider,merchant_reference,amount_minor,currency,status)
-      select id,'manual','rls-forbidden-insert',100,'KES','created'
-      from public.payment_tenants where slug like 'rls-b-%';
+      values(current_setting('test.tenant_b')::uuid,'manual','rls-forbidden-insert',100,'KES','created');
     raise exception 'FAIL: cross-tenant insert was accepted';
   exception when insufficient_privilege then
     write_rejected := true;

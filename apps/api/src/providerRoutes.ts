@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { withUserTransaction } from "./db.js";
@@ -142,6 +143,8 @@ async function persistProviderNotification(
   const capability = issueProviderSystemCapability(provider, tenantId, eventId);
   const claimToken = randomUUID();
   const claimed = await withProviderSystemTransaction(capability, async (client, scope) => {
+    const tenant = await client.query("select id from public.payment_tenants where id=$1", [scope.tenantId]);
+    if (!tenant.rows[0]) return { kind: "tenant_missing" as const };
     const correlationColumn = scope.provider === "daraja" ? "provider_checkout_request_id" : "provider_order_tracking_id";
     const tx = await client.query(
       `select id,amount_minor,currency,status from public.payment_transactions
@@ -160,6 +163,7 @@ async function persistProviderNotification(
     if (!row) return { kind: "unmatched" as const };
     return { kind: "claimed" as const, eventDbId: inserted.rows[0].id, transaction: row };
   });
+  if (claimed.kind === "tenant_missing") { response.tenantMissing(); return; }
   if (claimed.kind === "duplicate") { response.duplicate(); return; }
   if (claimed.kind === "unmatched") { response.unmatched(); return; }
 
@@ -223,7 +227,7 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? ""), expected=process.env.DARAJA_CALLBACK_TOKEN;
   if (!idSchema.safeParse(tenantId).success || !expected || expected.length < 32 || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
   const callback=(req.body as any)?.Body?.stkCallback;
-  if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
+  if (!callback || typeof callback.CheckoutRequestID!=="string" || callback.CheckoutRequestID.length<1 || callback.CheckoutRequestID.length>200 || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
   const items=callback.CallbackMetadata?.Item;
   const amount=Array.isArray(items) ? Number(items.find((item:any)=>item.Name==="Amount")?.Value) : NaN;
   const receipt=Array.isArray(items) ? items.find((item:any)=>item.Name==="MpesaReceiptNumber")?.Value : undefined;
@@ -236,11 +240,13 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
       success:(message)=>res.status(200).json({ResultCode:0,ResultDesc:message}),
       duplicate:()=>res.status(200).json({ResultCode:0,ResultDesc:"Duplicate accepted"}),
       unmatched:()=>res.status(200).json({ResultCode:0,ResultDesc:"Accepted for transaction correlation"}),
+      tenantMissing:()=>res.status(404).json({ResultCode:1,ResultDesc:"Unknown tenant"}),
     });
   } catch(error) { return next(error); }
 });
 
-router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
+const pesapalIpnLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: "draft-8", legacyHeaders: false });
+router.get("/webhooks/pesapal/:tenantId", pesapalIpnLimiter, async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? "");
   if (!idSchema.safeParse(tenantId).success) return res.status(404).send("Not found");
   const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
@@ -254,6 +260,7 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
       success:(message)=>res.status(200).send(message),
       duplicate:()=>res.status(200).send("Duplicate accepted"),
       unmatched:()=>res.status(200).send("Accepted for transaction correlation"),
+      tenantMissing:()=>res.status(404).send("Not found"),
     });
   } catch(error) { return next(error); }
 });

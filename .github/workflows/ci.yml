@@ -63,6 +63,7 @@ jobs:
         run: |
           for migration in neon/migrations/00[1-6]_*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
           psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f neon/tests/tenant_isolation.sql
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f neon/tests/tenant_rls_adversarial.sql
       - name: Critical vulnerability audit
         run: npm audit --audit-level=critical
       - name: API and web typechecks

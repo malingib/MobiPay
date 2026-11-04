@@ -151,14 +151,17 @@ router.post("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
     if (!secret || secret.length<32) return res.status(400).json({error:"webhook_secret_not_configured",message:"Configure a random signing secret of at least 32 characters in deployment secret storage before registering this endpoint."});
     try { await assertSafeWebhookUrl(parsed.data.url); }
     catch { return res.status(400).json({error:"unsafe_webhook_url",message:"Endpoint must be a publicly routable HTTPS URL. Local, private, credentialed and non-HTTPS destinations are rejected."}); }
-    const result=await getPool().query(
-      "insert into public.payment_merchant_webhook_endpoints(tenant_id,url,signing_secret_reference,subscribed_events,enabled) values($1,$2,$3,$4::text[],true) returning id,url,subscribed_events,enabled,created_at",
-      [tenantId,parsed.data.url,parsed.data.signingSecretReference,parsed.data.subscribedEvents],
-    );
-    await getPool().query(
-      "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'webhook.endpoint.created','webhook_endpoint',$3,$4::jsonb)",
-      [tenantId,req.authUser!.id,result.rows[0].id,JSON.stringify({url:parsed.data.url,subscribedEvents:parsed.data.subscribedEvents})],
-    );
+    const result=await withUserTransaction(req.authUser!.id, async (client) => {
+      const created=await client.query(
+        "insert into public.payment_merchant_webhook_endpoints(tenant_id,url,signing_secret_reference,subscribed_events,enabled) values($1,$2,$3,$4::text[],true) returning id,url,subscribed_events,enabled,created_at",
+        [tenantId,parsed.data.url,parsed.data.signingSecretReference,parsed.data.subscribedEvents],
+      );
+      await client.query(
+        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'webhook.endpoint.created','webhook_endpoint',$3,$4::jsonb)",
+        [tenantId,req.authUser!.id,created.rows[0].id,JSON.stringify({url:parsed.data.url,subscribedEvents:parsed.data.subscribedEvents})],
+      );
+      return created;
+    });
     return res.status(201).json({endpoint:result.rows[0]});
   } catch(error) { return next(error); }
 });
@@ -170,9 +173,13 @@ router.post("/tenants/:tenantId/webhook-endpoints/:endpointId/disable", async (r
     const member=await membership(req.authUser!.id,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
-    const result=await getPool().query("update public.payment_merchant_webhook_endpoints set enabled=false,updated_at=now() where id=$1 and tenant_id=$2 returning id,enabled",[endpointId,tenantId]);
+    const result=await withUserTransaction(req.authUser!.id, async (client) => {
+      const disabled=await client.query("update public.payment_merchant_webhook_endpoints set enabled=false,updated_at=now() where id=$1 and tenant_id=$2 returning id,enabled",[endpointId,tenantId]);
+      if (!disabled.rows[0]) return disabled;
+      await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id) values($1,$2,'webhook.endpoint.disabled','webhook_endpoint',$3)",[tenantId,req.authUser!.id,endpointId]);
+      return disabled;
+    });
     if (!result.rows[0]) return res.status(404).json({error:"webhook_endpoint_not_found"});
-    await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id) values($1,$2,'webhook.endpoint.disabled','webhook_endpoint',$3)",[tenantId,req.authUser!.id,endpointId]);
     return res.json({endpoint:result.rows[0]});
   } catch(error) { return next(error); }
 });
@@ -246,21 +253,21 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
     if (!member) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin", "finance"].includes(member.role)) return res.status(403).json({ error: "insufficient_role" });
     const d = parsed.data;
-    const result = await getPool().query(
+    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,$2,$3,$4,$5,$6,'created',$7,$8) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider,merchant_reference,amount_minor,currency,status,created_at",
       [tenantId,d.provider,d.merchantReference,idempotencyKey,d.amountMinor,d.currency,d.payerReference ?? null,d.description ?? null],
-    );
+    ));
     if (result.rows[0]) {
-      await getPool().query(
+      await withUserTransaction(req.authUser!.id, (client) => client.query(
         "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,correlation_id,metadata) values($1,$2,'transaction.created','transaction',$3,$4,$5::jsonb)",
         [tenantId,req.authUser!.id,result.rows[0].id,randomUUID(),JSON.stringify({ provider: d.provider, amountMinor: d.amountMinor })],
-      );
+      ));
       return res.status(201).json({ transaction: result.rows[0], idempotentReplay: false });
     }
-    const existing = await getPool().query(
+    const existing = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select id,provider,merchant_reference,amount_minor,currency,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
       [tenantId,idempotencyKey],
-    );
+    ));
     if (!existing.rows[0]) return res.status(409).json({ error: "idempotency_conflict" });
     const row = existing.rows[0];
     if (row.provider !== d.provider || row.merchant_reference !== d.merchantReference || Number(row.amount_minor) !== d.amountMinor || row.currency !== d.currency) {

@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { getPool, withUserTransaction } from "./db.js";
+import { withUserTransaction } from "./db.js";
+import { issueProviderSystemCapability, withProviderSystemTransaction } from "./systemDb.js";
+import { randomUUID } from "node:crypto";
 import { requireAuth } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
@@ -126,44 +128,114 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
   } catch(error) { return next(error); }
 });
 
+async function persistProviderNotification(
+  provider: "daraja" | "pesapal",
+  tenantId: string,
+  eventId: string,
+  eventType: string,
+  payload: unknown,
+  eventHash: string,
+  statusLookup: () => Promise<{ code: number; amountMinor?: number; currency?: string; receipt?: string }>,
+  response: { success: (message: string) => void; duplicate: () => void; unmatched: () => void },
+) {
+  const capability = issueProviderSystemCapability(provider, tenantId, eventId);
+  const claimToken = randomUUID();
+  const claimed = await withProviderSystemTransaction(capability, async (client, scope) => {
+    const correlationColumn = scope.provider === "daraja" ? "provider_checkout_request_id" : "provider_order_tracking_id";
+    const tx = await client.query(
+      `select id,amount_minor,currency,status from public.payment_transactions
+       where tenant_id=$1 and provider=$2 and ${correlationColumn}=$3 for update`,
+      [scope.tenantId, scope.provider, scope.eventId],
+    );
+    const row = tx.rows[0];
+    const inserted = await client.query(
+      `insert into public.payment_provider_events
+       (tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at,claim_token,lease_expires_at,last_error)
+       values($1,$2,$3,$4,$5,$6::jsonb,$7,1,case when $7='received' then now() else null end,$8,case when $7='received' then now()+interval '5 minutes' else null end,$9)
+       on conflict (tenant_id,provider,provider_event_id) do nothing returning id`,
+      [scope.tenantId,scope.provider,scope.eventId,eventType,eventHash,JSON.stringify(payload),row ? "received" : "retry",row ? claimToken : null,row ? null : "Provider notification is waiting for transaction correlation"],
+    );
+    if (!inserted.rows[0]) return { kind: "duplicate" as const };
+    if (!row) return { kind: "unmatched" as const };
+    return { kind: "claimed" as const, eventDbId: inserted.rows[0].id, transaction: row };
+  });
+  if (claimed.kind === "duplicate") { response.duplicate(); return; }
+  if (claimed.kind === "unmatched") { response.unmatched(); return; }
+
+  let verified: { code: number; amountMinor?: number; currency?: string; receipt?: string };
+  try {
+    verified = await statusLookup();
+  } catch {
+    await withProviderSystemTransaction(capability, async (client, scope) => {
+      await client.query(
+        "update public.payment_provider_events set processing_status='retry',retry_at=now()+interval '60 seconds',processing_started_at=null,claim_token=null,lease_expires_at=null,last_error='Independent provider status query failed' where id=$1 and tenant_id=$2 and provider=$3 and provider_event_id=$4 and claim_token=$5",
+        [claimed.eventDbId,scope.tenantId,scope.provider,scope.eventId,claimToken],
+      );
+    });
+    response.success("Accepted for provider status recovery");
+    return;
+  }
+
+  await withProviderSystemTransaction(capability, async (client, scope) => {
+    const current = await client.query(
+      "select id,status,amount_minor,currency from public.payment_transactions where id=$1 and tenant_id=$2 and provider=$3 for update",
+      [claimed.transaction.id,scope.tenantId,scope.provider],
+    );
+    if (!current.rows[0]) throw new Error("Provider callback correlation changed during verification");
+    const tx = current.rows[0];
+    const amountMatches = verified.amountMinor === Number(tx.amount_minor);
+    const currencyMatches = (verified.currency ?? String(tx.currency)).toUpperCase() === String(tx.currency).toUpperCase();
+    const terminalCode = scope.provider === "daraja" ? verified.code === 0 : verified.code === 1 || verified.code === 2;
+    const evidenceMatches = terminalCode && amountMatches && currencyMatches &&
+      (scope.provider !== "daraja" || (typeof verified.receipt === "string" && verified.receipt.length > 0));
+
+    if (evidenceMatches && ["created","pending","unknown"].includes(tx.status)) {
+      const outcome = scope.provider === "pesapal" && verified.code === 2 ? "failed" : "succeeded";
+      await client.query(
+        "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('created','pending','unknown')",
+        [outcome,scope.provider+"_status_query_verified",verified.receipt ?? null,tx.id,scope.tenantId],
+      );
+      await client.query(
+        "insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,correlation_id,metadata) values($1,$2,'transaction',$3,$4,$5::jsonb)",
+        [scope.tenantId,scope.provider+".callback.verified",tx.id,scope.eventId,JSON.stringify({providerCode:verified.code,amountMinor:verified.amountMinor,currency:verified.currency ?? tx.currency,receipt:verified.receipt ?? null})],
+      );
+    } else if (!evidenceMatches || !["created","pending","unknown"].includes(tx.status)) {
+      await client.query(
+        "update public.payment_transactions set status='unknown',provider_status=$1,updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending')",
+        [scope.provider+"_callback_requires_review",tx.id,scope.tenantId],
+      );
+      await client.query(
+        "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,$3,$4,'status_mismatch',$5::jsonb)",
+        [scope.tenantId,tx.id,scope.provider,scope.eventId,JSON.stringify({reason:"Provider status, amount, currency, or current ledger state requires manual review.",providerCode:verified.code,amountMinor:verified.amountMinor ?? null,currency:verified.currency ?? null})],
+      );
+    }
+    const completed = await client.query(
+      "update public.payment_provider_events set processing_status='processed',processed_at=now(),processing_started_at=null,claim_token=null,lease_expires_at=null,last_error=null where id=$1 and tenant_id=$2 and provider=$3 and provider_event_id=$4 and claim_token=$5 returning id",
+      [claimed.eventDbId,scope.tenantId,scope.provider,scope.eventId,claimToken],
+    );
+    if (!completed.rowCount) throw new Error("Provider callback lease was lost before completion");
+  });
+  response.success("Accepted");
+}
+
 router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? ""), expected=process.env.DARAJA_CALLBACK_TOKEN;
   if (!idSchema.safeParse(tenantId).success || !expected || expected.length < 32 || !tokenMatches(token,expected)) return res.status(404).json({ResultCode:1,ResultDesc:"Not found"});
   const callback=(req.body as any)?.Body?.stkCallback;
   if (!callback || typeof callback.CheckoutRequestID!=="string" || typeof callback.ResultCode!=="number") return res.status(400).json({ResultCode:1,ResultDesc:"Invalid callback"});
+  const items=callback.CallbackMetadata?.Item;
+  const amount=Array.isArray(items) ? Number(items.find((item:any)=>item.Name==="Amount")?.Value) : NaN;
+  const receipt=Array.isArray(items) ? items.find((item:any)=>item.Name==="MpesaReceiptNumber")?.Value : undefined;
   try {
-    const eventId=callback.CheckoutRequestID;
-    const tx=await getPool().query("select id,amount_minor,status from public.payment_transactions where tenant_id=$1 and provider='daraja' and provider_checkout_request_id=$2",[tenantId,eventId]);
-    if (!tx.rows[0]) {
-      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,last_error) values($1,'daraja',$2,'stk_callback',$3,$4::jsonb,'retry','Callback arrived before checkout ID was attached to a transaction') on conflict do nothing",[tenantId,eventId,sha256Payload(req.body),JSON.stringify(req.body)]);
-      return res.status(200).json({ResultCode:0,ResultDesc:"Accepted for review"});
-    }
-    const row=tx.rows[0];
-    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at) values($1,'daraja',$2,'stk_callback',$3,$4::jsonb,'received',1,now()) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,processing_started_at=now(),last_error=null,payload=excluded.payload where payment_provider_events.processing_status='retry' returning id",[tenantId,eventId,sha256Payload(req.body),JSON.stringify(req.body)]);
-    if (!event.rows[0]) return res.status(200).json({ResultCode:0,ResultDesc:"Duplicate accepted"});
-    let verified=false;
-    let callbackAmount:number|undefined;
-    let receipt:string|undefined;
-    const items=callback.CallbackMetadata?.Item;
-    if (Array.isArray(items)) {
-      callbackAmount=Number(items.find((i:any)=>i.Name==="Amount")?.Value);
-      receipt=items.find((i:any)=>i.Name==="MpesaReceiptNumber")?.Value;
-    }
-    try {
-      const credentials = await getTenantProviderCredentials(tenantId, "daraja") as Record<string, string>;
-      const status=await queryDarajaStk(eventId, credentials);
-      verified=String(status.ResultCode)==="0" && callback.ResultCode===0 && callbackAmount!==undefined && callbackAmount*100===Number(row.amount_minor) && typeof receipt==="string" && receipt.length>0;
-    } catch { verified=false; }
-    if (verified) {
-      await getPool().query("update public.payment_transactions set status='succeeded',provider_status='status_query_verified',provider_receipt=$1,confirmed_at=coalesce(confirmed_at,now()),updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending','unknown')",[receipt,row.id,tenantId]);
-      await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now(),processing_started_at=null,last_error=null where id=$1",[event.rows[0].id]);
-      await getPool().query("insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,metadata) values($1,'daraja.callback.verified','transaction',$2,$3::jsonb)",[tenantId,row.id,JSON.stringify({receipt})]);
-    } else {
-      await getPool().query("update public.payment_transactions set status='unknown',provider_status='callback_received_unverified',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
-      await getPool().query("insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'daraja',$3,'status_mismatch',$4::jsonb)",[tenantId,row.id,eventId,JSON.stringify({reason:"Callback could not be independently verified; manual review required."})]);
-      await getPool().query("update public.payment_provider_events set processing_status='retry',processing_started_at=null,last_error='Provider status could not be verified' where id=$1",[event.rows[0].id]);
-    }
-    return res.status(200).json({ResultCode:0,ResultDesc:"Accepted"});
+    await persistProviderNotification("daraja",tenantId,callback.CheckoutRequestID,"stk_callback",req.body,sha256Payload(req.body),async()=>{
+      const credentials=await getTenantProviderCredentials(tenantId,"daraja") as Record<string,string>;
+      const status=await queryDarajaStk(callback.CheckoutRequestID,credentials);
+      return {code:Number(status.ResultCode),amountMinor:Number.isFinite(amount)?Math.round(amount*100):undefined,currency:"KES",receipt:typeof receipt==="string"?receipt:undefined};
+    },{
+      success:(message)=>res.status(200).json({ResultCode:0,ResultDesc:message}),
+      duplicate:()=>res.status(200).json({ResultCode:0,ResultDesc:"Duplicate accepted"}),
+      unmatched:()=>res.status(200).json({ResultCode:0,ResultDesc:"Accepted for transaction correlation"}),
+    });
   } catch(error) { return next(error); }
 });
 
@@ -173,37 +245,15 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
   const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
   if (!trackingId || trackingId.length>200) return res.status(400).send("Missing order tracking id");
   try {
-    const tx=await getPool().query("select id,amount_minor,currency,status from public.payment_transactions where tenant_id=$1 and provider='pesapal' and provider_order_tracking_id=$2",[tenantId,trackingId]);
-    if (!tx.rows[0]) {
-      await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,last_error) values($1,'pesapal',$2,'ipn_status_query',$3,$4::jsonb,'retry','Notification arrived before tracking ID was attached to a transaction') on conflict do nothing",[tenantId,trackingId,sha256Payload({query:req.query}),JSON.stringify({query:req.query})]);
-      return res.status(200).send("Accepted for review");
-    }
-    const row=tx.rows[0];
-    const event=await getPool().query("insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status,processing_attempts,processing_started_at) values($1,'pesapal',$2,'ipn_status_query',$3,$4::jsonb,'received',1,now()) on conflict (tenant_id,provider,provider_event_id) do update set processing_status='received',processing_attempts=payment_provider_events.processing_attempts+1,processing_started_at=now(),last_error=null,payload=excluded.payload where payment_provider_events.processing_status='retry' returning id",[tenantId,trackingId,sha256Payload({query:req.query}),JSON.stringify({query:req.query})]);
-    if (!event.rows[0]) return res.status(200).send("Duplicate accepted");
-    try {
-      const credentials = await getTenantProviderCredentials(tenantId, "pesapal") as Record<string, string>;
-      const status=await queryPesapalStatus(trackingId, credentials);
-      const code=Number(status.status_code);
-      const amount=Number(status.amount);
-      const currency=String(status.currency_code ?? status.currency ?? "");
-      const amountMatches=Number.isFinite(amount) && Math.round(amount*100)===Number(row.amount_minor) && currency.toUpperCase()==="KES";
-      if (code===1 && amountMatches) {
-        await getPool().query("update public.payment_transactions set status='succeeded',provider_status='pesapal_status_verified',confirmed_at=now(),updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending','unknown')",[row.id,tenantId]);
-        await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
-      } else if (code===2 && amountMatches) {
-        await getPool().query("update public.payment_transactions set status='failed',provider_status='pesapal_status_verified_failed',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending','unknown')",[row.id,tenantId]);
-        await getPool().query("update public.payment_provider_events set processing_status='processed',processed_at=now() where id=$1",[event.rows[0].id]);
-      } else {
-        await getPool().query("update public.payment_transactions set status='unknown',provider_status='pesapal_status_requires_review',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
-        await getPool().query("insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'pesapal',$3,'status_mismatch',$4::jsonb)",[tenantId,row.id,trackingId,JSON.stringify({reason:"Provider status or amount/currency could not be safely reconciled."})]);
-        await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
-      }
-    } catch {
-      await getPool().query("update public.payment_transactions set status='unknown',provider_status='pesapal_status_query_failed',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[row.id,tenantId]);
-      await getPool().query("update public.payment_provider_events set processing_status='retry' where id=$1",[event.rows[0].id]);
-    }
-    return res.status(200).send("Accepted");
+    await persistProviderNotification("pesapal",tenantId,trackingId,"ipn_status_query",{query:req.query},sha256Payload({query:req.query}),async()=>{
+      const credentials=await getTenantProviderCredentials(tenantId,"pesapal") as Record<string,string>;
+      const status=await queryPesapalStatus(trackingId,credentials);
+      return {code:Number(status.status_code),amountMinor:Number.isFinite(Number(status.amount))?Math.round(Number(status.amount)*100):undefined,currency:String(status.currency_code??status.currency??"")};
+    },{
+      success:(message)=>res.status(200).send(message),
+      duplicate:()=>res.status(200).send("Duplicate accepted"),
+      unmatched:()=>res.status(200).send("Accepted for transaction correlation"),
+    });
   } catch(error) { return next(error); }
 });
 

@@ -4,13 +4,27 @@ import { issuePaymentWorkerCapability, newLeaseToken, withPaymentWorkerTransacti
 
 type RetryEvent = {
   id: string; tenant_id: string; provider: "daraja" | "pesapal"; provider_event_id: string;
-  payload: Record<string, any>; transaction_id: string | null; amount_minor: string | number | null;
+  processing_attempts: number; payload: Record<string, any>; transaction_id: string | null; amount_minor: string | number | null;
   currency: string | null; status: string | null; claim_token: string;
 };
 
 async function retryOwnedEvent(event: RetryEvent, message: string) {
   const cap = issuePaymentWorkerCapability();
   await withPaymentWorkerTransaction(cap, async (client) => {
+    const attempts = Number(event.processing_attempts) + 1;
+    if (attempts >= 10) {
+      const owned = await client.query(
+        "update public.payment_provider_events set processing_status='rejected',processing_started_at=null,claim_token=null,lease_expires_at=null,last_error=$3 where id=$1 and tenant_id=$2 and claim_token=$4 returning id",
+        [event.id,event.tenant_id,message.slice(0,1000),event.claim_token],
+      );
+      if (owned.rowCount) {
+        await client.query(
+          "insert into public.payment_reconciliation_exceptions(tenant_id,provider,provider_reference,exception_type,details) values($1,$2,$3,'other',$4::jsonb)",
+          [event.tenant_id,event.provider,event.provider_event_id,JSON.stringify({reason:"Provider callback recovery exhausted its retry budget.",lastError:message.slice(0,500)})],
+        );
+      }
+      return;
+    }
     await client.query(
       "update public.payment_provider_events set processing_status='retry',processing_started_at=null,claim_token=null,lease_expires_at=null,retry_at=now()+interval '60 seconds',last_error=$3 where id=$1 and tenant_id=$2 and claim_token=$4",
       [event.id,event.tenant_id,message.slice(0,1000),event.claim_token],
@@ -26,7 +40,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
     const leaseToken = newLeaseToken();
     const event = await withPaymentWorkerTransaction(workerCapability, async (client) => {
       const selected = await client.query(
-        `select e.id,e.tenant_id,e.provider,e.provider_event_id,e.payload,
+        `select e.id,e.tenant_id,e.provider,e.provider_event_id,e.payload,e.processing_attempts,
            t.id as transaction_id,t.amount_minor,t.currency,t.status
          from public.payment_provider_events e
          left join public.payment_transactions t on t.tenant_id=e.tenant_id and

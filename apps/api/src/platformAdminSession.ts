@@ -3,7 +3,7 @@ import type { NextFunction, Request, Response } from "express";
 
 const COOKIE = "mobiwave_platform_admin";
 const SESSION_SECONDS = 8 * 60 * 60;
-type Session = { username: string; iat: number; exp: number };
+type Session = { username: string; iat: number; exp: number };\nconst adminCapabilityBrand: unique symbol = Symbol("platform-admin-capability");\nexport interface PlatformAdminCapability { readonly username: string; readonly [adminCapabilityBrand]: true }\ndeclare global { namespace Express { interface Request { platformAdminCapability?: PlatformAdminCapability } } }
 
 function secret() {
   const value = process.env.PLATFORM_ADMIN_SESSION_SECRET ?? "";
@@ -52,7 +52,7 @@ export function requirePlatformAdmin(req: Request, res: Response, next: NextFunc
     const token = parseCookies(req.headers.cookie)[COOKIE];
     const session = verifyAdminSession(token);
     if (!session) return res.status(401).json({ error: "platform_admin_session_required" });
-    (req as Request & { platformAdmin?: Session }).platformAdmin = session;
+    (req as Request & { platformAdmin?: Session }).platformAdmin = session;\n    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true });
     return next();
   } catch {
     return res.status(503).json({ error: "platform_admin_session_not_configured" });

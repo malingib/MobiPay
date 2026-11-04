@@ -138,7 +138,7 @@ async function persistProviderNotification(
   payload: unknown,
   eventHash: string,
   statusLookup: (capability: ProviderSystemCapability) => Promise<{ code: number; amountMinor?: number; currency?: string; receipt?: string }>,
-  response: { success: (message: string) => void; duplicate: () => void; unmatched: () => void },
+  response: { success: (message: string) => void; duplicate: () => void; unmatched: () => void; tenantMissing: () => void },
 ) {
   const capability = issueProviderSystemCapability(provider, tenantId, eventId);
   const claimToken = randomUUID();
@@ -204,7 +204,7 @@ async function persistProviderNotification(
         "insert into public.payment_audit_events(tenant_id,action,entity_type,entity_id,correlation_id,metadata) values($1,$2,'transaction',$3,$4,$5::jsonb)",
         [scope.tenantId,scope.provider+".callback.verified",tx.id,scope.eventId,JSON.stringify({providerCode:verified.code,amountMinor:verified.amountMinor,currency:verified.currency ?? tx.currency,receipt:verified.receipt ?? null})],
       );
-    } else if (!evidenceMatches || !["created","pending","unknown"].includes(tx.status)) {
+    } else if (!evidenceMatches || tx.status === "created" || !["pending","unknown"].includes(tx.status)) {
       await client.query(
         "update public.payment_transactions set status='unknown',provider_status=$1,updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending')",
         [scope.provider+"_callback_requires_review",tx.id,scope.tenantId],

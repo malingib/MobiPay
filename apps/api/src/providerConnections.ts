@@ -5,7 +5,8 @@ import rateLimit from "express-rate-limit";
 import { withUserTransaction } from "./db.js";
 import { withPaymentWorkerTransaction, withProviderSystemTransaction } from "./systemDb.js";
 import type { PaymentWorkerCapability, ProviderSystemCapability } from "./systemDb.js";
-import { requireAuth } from "./auth.js";
+import { requireAuth, merchantCapabilityUserId } from "./auth.js";
+import type { MerchantDatabaseCapability } from "./auth.js";
 
 const router = Router();
 const idSchema = z.string().uuid();
@@ -49,8 +50,10 @@ export function decryptProviderCredentials(payload: string): ProviderCredentials
   return JSON.parse(clear) as ProviderCredentials;
 }
 
-async function memberRole(userId: string, tenantId: string) {
-  return withUserTransaction(userId, async (client) => {
+async function memberRole(capability: MerchantDatabaseCapability, tenantId: string) {
+  const userId = merchantCapabilityUserId(capability);
+  if (!userId) throw new Error("Verified merchant capability is required");
+  return withUserTransaction(capability, async (client) => {
     const result = await client.query(
       "select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
       [userId, tenantId],
@@ -91,8 +94,8 @@ router.get("/tenants/:tenantId/provider-connections", async (req, res, next) => 
   const tenantId = String(req.params.tenantId ?? "");
   if (!idSchema.safeParse(tenantId).success) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
-    if (!await memberRole(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    if (!await memberRole(req.merchantDbCapability!, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select provider,connection_status,enabled,environment,last_tested_at,last_error_code,updated_at from public.payment_provider_configs where tenant_id=$1 and account_reference='primary' order by provider",
       [tenantId],
     ));
@@ -107,13 +110,13 @@ router.put("/tenants/:tenantId/provider-connections/:provider", async (req, res,
   const parsed = providerParsed.data === "daraja" ? darajaCredentials.safeParse(req.body) : pesapalCredentials.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_credentials", details: parsed.error.flatten() });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
     let encrypted: string;
     try { encrypted = encryptProviderCredentials(parsed.data); }
     catch { return res.status(503).json({ error: "credential_encryption_unavailable", message: "Provider credential encryption is not configured correctly." }); }
-    const result = await withUserTransaction(req.authUser!.id, async (client) => {
+    const result = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const saved = await client.query(
         `insert into public.payment_provider_configs(tenant_id,provider,account_reference,secret_reference,environment,enabled,encrypted_credentials,connection_status,last_error_code,created_by,updated_at)
          values($1,$2,'primary','db-encrypted:aes-256-gcm:v1','sandbox',false,$3,'configured',null,$4,now())
@@ -137,10 +140,10 @@ router.post("/tenants/:tenantId/provider-connections/:provider/test", providerTe
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
-    const found = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    const found = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select encrypted_credentials from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary' and encrypted_credentials is not null",
       [tenantId, providerParsed.data],
     ));
@@ -150,7 +153,7 @@ router.post("/tenants/:tenantId/provider-connections/:provider/test", providerTe
     catch { return res.status(503).json({ error: "credential_decryption_failed", message: "Credentials could not be decrypted. Verify the encryption key has not changed." }); }
     try {
       await verifySandbox(providerParsed.data, credentials);
-      const updated = await withUserTransaction(req.authUser!.id, async (client) => {
+      const updated = await withUserTransaction(req.merchantDbCapability!, async (client) => {
         const saved = await client.query(
           "update public.payment_provider_configs set connection_status='verified',enabled=true,last_tested_at=now(),last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,environment,last_tested_at,updated_at",
           [tenantId, providerParsed.data],
@@ -163,7 +166,7 @@ router.post("/tenants/:tenantId/provider-connections/:provider/test", providerTe
       });
       return res.json({ connection: updated.rows[0], message: "Sandbox credentials verified. This verifies authentication only; a live payment has not been tested." });
     } catch {
-      await withUserTransaction(req.authUser!.id, (client) => client.query(
+      await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
         "update public.payment_provider_configs set connection_status='error',enabled=false,last_tested_at=now(),last_error_code='provider_credentials_rejected',updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary'",
         [tenantId, providerParsed.data],
       ));
@@ -177,10 +180,10 @@ router.delete("/tenants/:tenantId/provider-connections/:provider", async (req, r
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
-    const result = await withUserTransaction(req.authUser!.id, async (client) => {
+    const result = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const removed = await client.query(
         "update public.payment_provider_configs set enabled=false,connection_status='disabled',encrypted_credentials=null,last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,updated_at",
         [tenantId, providerParsed.data],
@@ -198,7 +201,7 @@ router.delete("/tenants/:tenantId/provider-connections/:provider", async (req, r
 });
 
 type ProviderCredentialAccess =
-  | { kind: "merchant"; userId: string }
+  | { kind: "merchant"; capability: MerchantDatabaseCapability }
   | { kind: "provider"; capability: ProviderSystemCapability }
   | { kind: "worker"; capability: PaymentWorkerCapability };
 
@@ -213,7 +216,7 @@ export async function getTenantProviderCredentials(
   );
   let result: import("pg").QueryResult;
   if (access.kind === "merchant") {
-    result = await withUserTransaction(access.userId, read);
+    result = await withUserTransaction(access.capability, read);
   } else if (access.kind === "provider") {
     result = await withProviderSystemTransaction(access.capability, async (client, scope) => {
       if (scope.tenantId !== tenantId || scope.provider !== provider) throw new Error("Provider capability scope mismatch");

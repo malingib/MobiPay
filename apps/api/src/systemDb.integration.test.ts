@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import test from "node:test";
 import pg from "pg";
@@ -5,8 +6,8 @@ import pg from "pg";
 const connectionString = process.env.TEST_DATABASE_URL;
 test("PostgreSQL callback correlation is tenant-scoped and duplicate events are idempotent", { skip: !connectionString }, async () => {
   const pool = new pg.Pool({ connectionString });
-  const tenantA = (await pool.query("insert into public.payment_tenants(name,slug) values('callback-a',$1) returning id", ["callback-a-"+crypto.randomUUID().replaceAll("-","")])).rows[0].id as string;
-  const tenantB = (await pool.query("insert into public.payment_tenants(name,slug) values('callback-b',$1) returning id", ["callback-b-"+crypto.randomUUID().replaceAll("-","")])).rows[0].id as string;
+  const tenantA = (await pool.query("insert into public.payment_tenants(name,slug) values('callback-a',$1) returning id", ["callback-a-"+randomUUID().replaceAll("-","")])).rows[0].id as string;
+  const tenantB = (await pool.query("insert into public.payment_tenants(name,slug) values('callback-b',$1) returning id", ["callback-b-"+randomUUID().replaceAll("-","")])).rows[0].id as string;
   try {
     await pool.query(
       "insert into public.payment_transactions(tenant_id,provider,provider_checkout_request_id,merchant_reference,amount_minor,currency,status) values($1,'daraja','shared-checkout-id','ref-a',100,'KES','pending')",
@@ -34,12 +35,12 @@ test("PostgreSQL callback correlation is tenant-scoped and duplicate events are 
 
 test("PostgreSQL SKIP LOCKED claims exclude a competing worker and stale leases cannot complete", { skip: !connectionString }, async () => {
   const pool = new pg.Pool({ connectionString, max: 4 });
-  const slug = "worker-"+crypto.randomUUID().replaceAll("-","");
+  const slug = "worker-"+randomUUID().replaceAll("-","");
   const tenant = (await pool.query("insert into public.payment_tenants(name,slug) values('worker test',$1) returning id",[slug])).rows[0].id as string;
   const endpoint = (await pool.query("insert into public.payment_merchant_webhook_endpoints(tenant_id,url,signing_secret_reference,enabled) values($1,'https://example.test/hook','TEST_WEBHOOK_SECRET',true) returning id",[tenant])).rows[0].id as string;
-  const delivery = (await pool.query("insert into public.payment_merchant_webhook_deliveries(tenant_id,endpoint_id,event_id,event_type,payload,status) values($1,$2,$3,'payment.succeeded','{}'::jsonb,'pending') returning id",[tenant,endpoint,crypto.randomUUID()])).rows[0].id as string;
+  const delivery = (await pool.query("insert into public.payment_merchant_webhook_deliveries(tenant_id,endpoint_id,event_id,event_type,payload,status) values($1,$2,$3,'payment.succeeded','{}'::jsonb,'pending') returning id",[tenant,endpoint,randomUUID()])).rows[0].id as string;
   const first = await pool.connect(), second = await pool.connect();
-  const firstLease = crypto.randomUUID(), staleLease = crypto.randomUUID();
+  const firstLease = randomUUID(), staleLease = randomUUID();
   try {
     await first.query("begin");
     const claim1 = await first.query("select id from public.payment_merchant_webhook_deliveries where id=$1 for update skip locked",[delivery]);

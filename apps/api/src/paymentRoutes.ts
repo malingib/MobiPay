@@ -2,7 +2,8 @@ import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getPool, withUserTransaction } from "./db.js";
-import { requireAuth } from "./auth.js";
+import { requireAuth, merchantCapabilityUserId } from "./auth.js";
+import type { MerchantDatabaseCapability } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
 import { reconcileRecords } from "./reconciliation.js";
 import { parseStatementCsv, sha256Statement } from "./statementImport.js";
@@ -36,8 +37,10 @@ const resolveSchema = z.object({
   resolutionNote: z.string().trim().min(3).max(1000),
 });
 
-async function membership(userId: string, tenantId: string) {
-  return withUserTransaction(userId, async (client) => {
+async function membership(capability: MerchantDatabaseCapability, tenantId: string) {
+  const userId = merchantCapabilityUserId(capability);
+  if (!userId) throw new Error("Verified merchant capability is required");
+  return withUserTransaction(capability, async (client) => {
     const result = await client.query(
       "select role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
       [userId, tenantId],
@@ -62,11 +65,11 @@ router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => 
   try { rows=parseStatementCsv(parsed.data.csvContent); }
   catch(error) { return res.status(400).json({error:"invalid_statement_csv",message:error instanceof Error ? error.message : "CSV could not be parsed"}); }
   try {
-    const member=await membership(req.authUser!.id,tenantId);
+    const member=await membership(req.merchantDbCapability!,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     const sourceHash=sha256Statement(parsed.data.csvContent);
-    const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
+    const outcome = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const created=await client.query(
         "insert into public.payment_reconciliation_runs(tenant_id,provider,source_name,source_sha256,status,rows_total,created_by) values($1,$2,$3,$4,'processing',$5,$6) on conflict (tenant_id,provider,source_sha256) do nothing returning id",
         [tenantId,parsed.data.provider,parsed.data.sourceName,sourceHash,rows.length,req.authUser!.id],
@@ -122,8 +125,8 @@ router.get("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? "");
   if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
   try {
-    if (!await membership(req.authUser!.id,tenantId)) return res.status(404).json({error:"tenant_not_found"});
-    const result=await withUserTransaction(req.authUser!.id, (client) => client.query(
+    if (!await membership(req.merchantDbCapability!,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const result=await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select id,url,subscribed_events,enabled,created_at,updated_at from public.payment_merchant_webhook_endpoints where tenant_id=$1 order by created_at desc",
       [tenantId],
     ));
@@ -137,14 +140,14 @@ router.post("/tenants/:tenantId/webhook-endpoints", async (req,res,next) => {
   const parsed=webhookEndpointSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.error.flatten()});
   try {
-    const member=await membership(req.authUser!.id,tenantId);
+    const member=await membership(req.merchantDbCapability!,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     const secret=process.env[parsed.data.signingSecretReference];
     if (!secret || secret.length<32) return res.status(400).json({error:"webhook_secret_not_configured",message:"Configure a random signing secret of at least 32 characters in deployment secret storage before registering this endpoint."});
     try { await assertSafeWebhookUrl(parsed.data.url); }
     catch { return res.status(400).json({error:"unsafe_webhook_url",message:"Endpoint must be a publicly routable HTTPS URL. Local, private, credentialed and non-HTTPS destinations are rejected."}); }
-    const result=await withUserTransaction(req.authUser!.id, async (client) => {
+    const result=await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const created=await client.query(
         "insert into public.payment_merchant_webhook_endpoints(tenant_id,url,signing_secret_reference,subscribed_events,enabled) values($1,$2,$3,$4::text[],true) returning id,url,subscribed_events,enabled,created_at",
         [tenantId,parsed.data.url,parsed.data.signingSecretReference,parsed.data.subscribedEvents],
@@ -163,10 +166,10 @@ router.post("/tenants/:tenantId/webhook-endpoints/:endpointId/disable", async (r
   const tenantId=String(req.params.tenantId ?? ""), endpointId=String(req.params.endpointId ?? "");
   if (!validTenantParam(tenantId) || !validTenantParam(endpointId)) return res.status(400).json({error:"invalid_id"});
   try {
-    const member=await membership(req.authUser!.id,tenantId);
+    const member=await membership(req.merchantDbCapability!,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
-    const result=await withUserTransaction(req.authUser!.id, async (client) => {
+    const result=await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const disabled=await client.query("update public.payment_merchant_webhook_endpoints set enabled=false,updated_at=now() where id=$1 and tenant_id=$2 returning id,enabled",[endpointId,tenantId]);
       if (!disabled.rows[0]) return disabled;
       await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id) values($1,$2,'webhook.endpoint.disabled','webhook_endpoint',$3)",[tenantId,req.authUser!.id,endpointId]);
@@ -183,7 +186,7 @@ router.post("/tenants", async (req, res, next) => {
   if (!parsed.success) return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
   const userId = req.authUser!.id;
   try {
-    const tenant = await withUserTransaction(userId, async (client) => {
+    const tenant = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const created = await client.query("insert into public.payment_tenants(name,slug) values($1,$2) returning id,name,slug,status,created_at", [parsed.data.name, parsed.data.slug]);
       const row = created.rows[0];
       await client.query("insert into public.payment_tenant_memberships(tenant_id,user_id,role,status) values($1,$2,$3,$4)", [row.id, userId, "owner", "active"]);
@@ -199,7 +202,7 @@ router.post("/tenants", async (req, res, next) => {
 
 router.get("/tenants", async (req, res, next) => {
   try {
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select t.id,t.name,t.slug,t.status,m.role,m.created_at from public.payment_tenants t join public.payment_tenant_memberships m on m.tenant_id=t.id where m.user_id=$1 and m.status='active' and t.status='active' order by t.created_at desc",
       [req.authUser!.id],
     ));
@@ -211,9 +214,9 @@ router.get("/tenants/:tenantId/transactions", async (req, res, next) => {
   const tenantId = req.params.tenantId!;
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
-    if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
+    if (!await membership(req.merchantDbCapability!, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select id,provider,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,merchant_reference,amount_minor,currency,status,payer_reference,description,provider_status,occurred_at,confirmed_at,created_at,updated_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit $2",
       [tenantId, limit],
     ));
@@ -229,11 +232,11 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
   const idempotencyKey = req.header("idempotency-key")?.trim();
   if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error: "idempotency_key_required" });
   try {
-    const member = await membership(req.authUser!.id, tenantId);
+    const member = await membership(req.merchantDbCapability!, tenantId);
     if (!member) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin", "finance"].includes(member.role)) return res.status(403).json({ error: "insufficient_role" });
     const d = parsed.data;
-    const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
+    const outcome = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const inserted = await client.query(
         "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,$2,$3,$4,$5,$6,'created',$7,$8) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider,merchant_reference,amount_minor,currency,status,created_at",
         [tenantId,d.provider,d.merchantReference,idempotencyKey,d.amountMinor,d.currency,d.payerReference ?? null,d.description ?? null],
@@ -265,8 +268,8 @@ router.get("/tenants/:tenantId/exceptions", async (req, res, next) => {
   const tenantId = req.params.tenantId!;
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
-    if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    if (!await membership(req.merchantDbCapability!, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select id,transaction_id,provider,provider_reference,exception_type,details,status,resolution_note,resolved_by,resolved_at,created_at,updated_at from public.payment_reconciliation_exceptions where tenant_id=$1 order by created_at desc limit 200",
       [tenantId],
     ));
@@ -280,10 +283,10 @@ router.post("/tenants/:tenantId/exceptions/:exceptionId/resolve", async (req, re
   const parsed = resolveSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
   try {
-    const member = await membership(req.authUser!.id, tenantId);
+    const member = await membership(req.merchantDbCapability!, tenantId);
     if (!member) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin", "finance"].includes(member.role)) return res.status(403).json({ error: "insufficient_role" });
-    const result = await withUserTransaction(req.authUser!.id, async (client) => {
+    const result = await withUserTransaction(req.merchantDbCapability!, async (client) => {
       const updated = await client.query("update public.payment_reconciliation_exceptions set status=$1,resolution_note=$2,resolved_by=$3,resolved_at=now(),updated_at=now() where id=$4 and tenant_id=$5 and status in ($6,$7) returning id,status,resolution_note,resolved_at", [parsed.data.status,parsed.data.resolutionNote,req.authUser!.id,exceptionId,tenantId,"open","investigating"]);
       if (!updated.rows[0]) return null;
       await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,$3,$4,$5,$6::jsonb)", [tenantId,req.authUser!.id,"reconciliation.exception.resolved","exception",exceptionId,JSON.stringify({status:parsed.data.status,note:parsed.data.resolutionNote})]);
@@ -298,8 +301,8 @@ router.get("/tenants/:tenantId/reports/transactions.csv", async (req, res, next)
   const tenantId = req.params.tenantId!;
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
-    if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
+    if (!await membership(req.merchantDbCapability!, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select id,provider,merchant_reference,amount_minor,currency,status,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,created_at,confirmed_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit 10000",
       [tenantId],
     ));

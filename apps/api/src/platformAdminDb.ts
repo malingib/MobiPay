@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { getPool } from "./db.js";
+import { isPlatformAdminCapability } from "./platformAdminSession.js";
 import type { PlatformAdminCapability } from "./platformAdminSession.js";
 
 /**
@@ -10,11 +11,12 @@ import type { PlatformAdminCapability } from "./platformAdminSession.js";
 export async function withPlatformAdminTransaction<T>(
   capability: PlatformAdminCapability,
   operation: (client: pg.PoolClient, actor: string) => Promise<T>,
+  dbPool: Pick<pg.Pool, "connect"> = getPool(),
 ): Promise<T> {
-  if (!capability || typeof capability.username !== "string" || !capability.username.trim()) {
+  if (!isPlatformAdminCapability(capability)) {
     throw new Error("A verified platform-admin capability is required");
   }
-  const client = await getPool().connect();
+  const client = await dbPool.connect();
   let active = false;
   try {
     await client.query("BEGIN");

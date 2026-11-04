@@ -58,7 +58,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const idempotencyKey = req.header("idempotency-key")?.trim();
     if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error:"idempotency_key_required" });
     const d = parsed.data;
-    const outcome = await withUserTransaction(req.merchantDbCapability!, async (client) => {
+    const outcome = await withUserTransaction<{ transaction: any; created: boolean }>(req.merchantDbCapability!, async (client) => {
       const inserted = await client.query(
         "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,'daraja',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider_transaction_id,status",
         [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.phone,d.description],
@@ -105,7 +105,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     const key=req.header("idempotency-key")?.trim();
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
-    const outcome=await withUserTransaction(req.merchantDbCapability!, async (client) => {
+    const outcome=await withUserTransaction<{ row: any; created: boolean }>(req.merchantDbCapability!, async (client) => {
       const inserted=await client.query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
       if (inserted.rows[0]) return {row:inserted.rows[0],created:true};
       const prior=await client.query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);

@@ -2,7 +2,9 @@ import { Router } from "express";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
-import { getPool, withUserTransaction } from "./db.js";
+import { withUserTransaction } from "./db.js";
+import { withPaymentWorkerTransaction, withProviderSystemTransaction } from "./systemDb.js";
+import type { PaymentWorkerCapability, ProviderSystemCapability } from "./systemDb.js";
 import { requireAuth } from "./auth.js";
 
 const router = Router();
@@ -195,11 +197,31 @@ router.delete("/tenants/:tenantId/provider-connections/:provider", async (req, r
   } catch (error) { return next(error); }
 });
 
-export async function getTenantProviderCredentials(tenantId: string, provider: "daraja" | "pesapal"): Promise<ProviderCredentials> {
-  const result = await getPool().query(
+type ProviderCredentialAccess =
+  | { kind: "merchant"; userId: string }
+  | { kind: "provider"; capability: ProviderSystemCapability }
+  | { kind: "worker"; capability: PaymentWorkerCapability };
+
+export async function getTenantProviderCredentials(
+  tenantId: string,
+  provider: "daraja" | "pesapal",
+  access: ProviderCredentialAccess,
+): Promise<ProviderCredentials> {
+  const read = async (client: import("pg").PoolClient) => client.query(
     "select encrypted_credentials,connection_status,enabled from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary'",
     [tenantId, provider],
   );
+  let result;
+  if (access.kind === "merchant") {
+    result = await withUserTransaction(access.userId, read);
+  } else if (access.kind === "provider") {
+    result = await withProviderSystemTransaction(access.capability, async (client, scope) => {
+      if (scope.tenantId !== tenantId || scope.provider !== provider) throw new Error("Provider capability scope mismatch");
+      return read(client);
+    });
+  } else {
+    result = await withPaymentWorkerTransaction(access.capability, read);
+  }
   const row = result.rows[0];
   if (!row || !row.encrypted_credentials || row.connection_status !== "verified" || row.enabled !== true) {
     throw new Error("merchant_provider_not_connected");

@@ -228,8 +228,8 @@ router.post("/webhooks/daraja/:tenantId/:token", async (req,res,next) => {
   const amount=Array.isArray(items) ? Number(items.find((item:any)=>item.Name==="Amount")?.Value) : NaN;
   const receipt=Array.isArray(items) ? items.find((item:any)=>item.Name==="MpesaReceiptNumber")?.Value : undefined;
   try {
-    await persistProviderNotification("daraja",tenantId,callback.CheckoutRequestID,"stk_callback",req.body,sha256Payload(req.body),async()=>{
-      const credentials=await getTenantProviderCredentials(tenantId,"daraja") as Record<string,string>;
+    await persistProviderNotification("daraja",tenantId,callback.CheckoutRequestID,"stk_callback",req.body,sha256Payload(req.body),async(capability)=>{
+      const credentials=await getTenantProviderCredentials(tenantId,"daraja",{kind:"provider",capability}) as Record<string,string>;
       const status=await queryDarajaStk(callback.CheckoutRequestID,credentials);
       return {code:Number(status.ResultCode),amountMinor:Number.isFinite(amount)?Math.round(amount*100):undefined,currency:"KES",receipt:typeof receipt==="string"?receipt:undefined};
     },{
@@ -246,8 +246,8 @@ router.get("/webhooks/pesapal/:tenantId", async (req,res,next) => {
   const trackingId=String(req.query.OrderTrackingId ?? req.query.orderTrackingId ?? "");
   if (!trackingId || trackingId.length>200) return res.status(400).send("Missing order tracking id");
   try {
-    await persistProviderNotification("pesapal",tenantId,trackingId,"ipn_status_query",{query:req.query},sha256Payload({query:req.query}),async()=>{
-      const credentials=await getTenantProviderCredentials(tenantId,"pesapal") as Record<string,string>;
+    await persistProviderNotification("pesapal",tenantId,trackingId,"ipn_status_query",{query:req.query},sha256Payload({query:req.query}),async(capability)=>{
+      const credentials=await getTenantProviderCredentials(tenantId,"pesapal",{kind:"provider",capability}) as Record<string,string>;
       const status=await queryPesapalStatus(trackingId,credentials);
       return {code:Number(status.status_code),amountMinor:Number.isFinite(Number(status.amount))?Math.round(Number(status.amount)*100):undefined,currency:String(status.currency_code??status.currency??"")};
     },{

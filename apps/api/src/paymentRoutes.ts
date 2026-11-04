@@ -61,7 +61,6 @@ router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => 
   let rows;
   try { rows=parseStatementCsv(parsed.data.csvContent); }
   catch(error) { return res.status(400).json({error:"invalid_statement_csv",message:error instanceof Error ? error.message : "CSV could not be parsed"}); }
-  try {
     const member=await membership(req.authUser!.id,tenantId);
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});

@@ -51,38 +51,33 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     const idempotencyKey = req.header("idempotency-key")?.trim();
     if (!idempotencyKey || idempotencyKey.length > 160) return res.status(400).json({ error:"idempotency_key_required" });
     const d = parsed.data;
-    const client = await getPool().connect();
-    let transaction: { id:string; provider_transaction_id:string|null; status:string } | undefined;
-    try {
-      await client.query("begin");
+    const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
       const inserted = await client.query(
         "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,'daraja',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider_transaction_id,status",
         [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.phone,d.description],
       );
-      transaction = inserted.rows[0];
-      if (!transaction) {
-        const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_checkout_request_id,status,payer_reference,description from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
-        const row = prior.rows[0];
-        if (!row || row.provider!=="daraja" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.payer_reference!==d.phone || row.description!==d.description) {
-          await client.query("rollback"); return res.status(409).json({error:"idempotency_conflict"});
-        }
-        await client.query("commit");
-        return res.status(200).json({transactionId:row.id,status:row.status,checkoutRequestId:row.provider_checkout_request_id,idempotentReplay:true});
-      }
-      await client.query("commit");
-    } catch (error) { await client.query("rollback").catch(()=>undefined); throw error; }
-    finally { client.release(); }
+      if (inserted.rows[0]) return { transaction: inserted.rows[0], created: true };
+      const prior = await client.query("select id,provider,merchant_reference,amount_minor,idempotency_key,provider_checkout_request_id,status,payer_reference,description from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,idempotencyKey]);
+      return { transaction: prior.rows[0], created: false };
+    });
+    const transaction = outcome.transaction;
+    if (!outcome.created) {
+      if (!transaction || transaction.provider!=="daraja" || transaction.merchant_reference!==d.merchantReference || Number(transaction.amount_minor)!==d.amountMinor || transaction.payer_reference!==d.phone || transaction.description!==d.description) return res.status(409).json({error:"idempotency_conflict"});
+      return res.status(200).json({transactionId:transaction.id,status:transaction.status,checkoutRequestId:transaction.provider_checkout_request_id,idempotentReplay:true});
+    }
 
     const callbackToken = process.env.DARAJA_CALLBACK_TOKEN;
     if (!callbackToken || callbackToken.length < 32) return res.status(503).json({error:"daraja_callback_token_not_configured",transactionId:transaction.id});
     const callbackUrl = `${baseUrl()}/api/v1/webhooks/daraja/${tenantId}/${callbackToken}`;
     try {
       const provider = await initiateDarajaStk({phone:d.phone,amount:d.amountMinor/100,accountReference:d.merchantReference,description:d.description,callbackUrl}, providerCredentials);
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_request_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
-      await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
+      await withUserTransaction(req.authUser!.id, async (client) => {
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_request_id=$1,provider_status='accepted_pending_confirmation',status='pending',updated_at=now() where id=$2 and tenant_id=$3",[provider.checkoutRequestId,transaction.id,tenantId]);
+        await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'daraja.stk.initiated','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transaction.id,JSON.stringify({checkoutRequestId:provider.checkoutRequestId})]);
+      });
       return res.status(202).json({transactionId:transaction.id,status:"pending",checkoutRequestId:provider.checkoutRequestId,message:"STK request accepted; payment remains pending until provider confirmation."});
     } catch {
-      await getPool().query("update public.payment_transactions set status='unknown',provider_status='initiation_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transaction.id,tenantId]);
+      await withUserTransaction(req.authUser!.id, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='initiation_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transaction.id,tenantId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId:transaction.id,message:"The provider outcome is uncertain. Check status before retrying with a new idempotency key."});
     }
   } catch(error) { return next(error); }
@@ -103,23 +98,29 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     const key=req.header("idempotency-key")?.trim();
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
-    const ins=await getPool().query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
-    if (!ins.rows[0]) {
-      const prior=await getPool().query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
-      const row=prior.rows[0];
+    const outcome=await withUserTransaction(req.authUser!.id, async (client) => {
+      const inserted=await client.query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
+      if (inserted.rows[0]) return {row:inserted.rows[0],created:true};
+      const prior=await client.query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
+      return {row:prior.rows[0],created:false};
+    });
+    if (!outcome.created) {
+      const row=outcome.row;
       if (!row || row.provider!=="pesapal" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description || row.payer_reference!==(d.phone??null)) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
       if (row.provider_order_tracking_id && row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,orderTrackingId:row.provider_order_tracking_id,idempotentReplay:true});
       return res.status(202).json({transactionId:row.id,status:row.status,message:"The provider outcome is being reconciled. Check transaction status before retrying."});
     }
-    const transactionId=ins.rows[0].id as string;
+    const transactionId=outcome.row.id as string;
     try {
       const callbackUrl=`${baseUrl()}/api/v1/webhooks/pesapal/${tenantId}`;
       const provider=await submitPesapalOrder({reference:transactionId,amount:d.amountMinor/100,description:d.description,callbackUrl,email:d.email,phone:d.phone}, providerCredentials);
-      await getPool().query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4",[provider.orderTrackingId,provider.redirectUrl,transactionId,tenantId]);
-      await getPool().query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
+      await withUserTransaction(req.authUser!.id, async (client) => {
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_order_tracking_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4",[provider.orderTrackingId,provider.redirectUrl,transactionId,tenantId]);
+        await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'pesapal.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({orderTrackingId:provider.orderTrackingId})]);
+      });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {
-      await getPool().query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]);
+      await withUserTransaction(req.authUser!.id, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Checkout outcome is uncertain; query provider status before retrying."});
     }
   } catch(error) { return next(error); }

@@ -211,7 +211,7 @@ export async function getTenantProviderCredentials(
     "select encrypted_credentials,connection_status,enabled from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary'",
     [tenantId, provider],
   );
-  let result;
+  let result: import("pg").QueryResult;
   if (access.kind === "merchant") {
     result = await withUserTransaction(access.userId, read);
   } else if (access.kind === "provider") {

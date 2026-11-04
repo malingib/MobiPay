@@ -64,7 +64,8 @@ export function requirePlatformAdmin(req: Request, res: Response, next: NextFunc
     const token = parseCookies(req.headers.cookie)[COOKIE];
     const session = verifyAdminSession(token);
     if (!session) return res.status(401).json({ error: "platform_admin_session_required" });
-    req.platformAdmin = session;\n    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true });
+    req.platformAdmin = session;
+    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true });
     return next();
   } catch {
     return res.status(503).json({ error: "platform_admin_session_not_configured" });

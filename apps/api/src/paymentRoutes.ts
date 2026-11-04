@@ -280,22 +280,14 @@ router.post("/tenants/:tenantId/exceptions/:exceptionId/resolve", async (req, re
     const member = await membership(req.authUser!.id, tenantId);
     if (!member) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin", "finance"].includes(member.role)) return res.status(403).json({ error: "insufficient_role" });
-    const client = await getPool().connect();
-    try {
-      await client.query("begin");
-      const result = await client.query(
-        "update public.payment_reconciliation_exceptions set status=$1,resolution_note=$2,resolved_by=$3,resolved_at=now(),updated_at=now() where id=$4 and tenant_id=$5 and status in ('open','investigating') returning id,status,resolution_note,resolved_at",
-        [parsed.data.status,parsed.data.resolutionNote,req.authUser!.id,exceptionId,tenantId],
-      );
-      if (!result.rows[0]) { await client.query("rollback"); return res.status(404).json({ error: "open_exception_not_found" }); }
-      await client.query(
-        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'reconciliation.exception.resolved','exception',$3,$4::jsonb)",
-        [tenantId,req.authUser!.id,exceptionId,JSON.stringify({ status: parsed.data.status, note: parsed.data.resolutionNote })],
-      );
-      await client.query("commit");
-      return res.json({ exception: result.rows[0] });
-    } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
-    finally { client.release(); }
+    const result = await withUserTransaction(req.authUser!.id, async (client) => {
+      const updated = await client.query("update public.payment_reconciliation_exceptions set status=$1,resolution_note=$2,resolved_by=$3,resolved_at=now(),updated_at=now() where id=$4 and tenant_id=$5 and status in ($6,$7) returning id,status,resolution_note,resolved_at", [parsed.data.status,parsed.data.resolutionNote,req.authUser!.id,exceptionId,tenantId,"open","investigating"]);
+      if (!updated.rows[0]) return null;
+      await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,$3,$4,$5,$6::jsonb)", [tenantId,req.authUser!.id,"reconciliation.exception.resolved","exception",exceptionId,JSON.stringify({status:parsed.data.status,note:parsed.data.resolutionNote})]);
+      return updated.rows[0];
+    });
+    if (!result) return res.status(404).json({ error: "open_exception_not_found" });
+    return res.json({ exception: result });
   } catch (error) { return next(error); }
 });
 
@@ -304,10 +296,10 @@ router.get("/tenants/:tenantId/reports/transactions.csv", async (req, res, next)
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
     if (!await membership(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await getPool().query(
+    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
       "select id,provider,merchant_reference,amount_minor,currency,status,provider_transaction_id,provider_checkout_request_id,provider_receipt,provider_order_tracking_id,created_at,confirmed_at from public.payment_transactions where tenant_id=$1 order by created_at desc limit 10000",
       [tenantId],
-    );
+    ));
     const safe = (value: unknown) => {
       const raw = value == null ? "" : String(value);
       const escaped = raw.replace(/"/g, '""');

@@ -233,23 +233,27 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
     if (!member) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin", "finance"].includes(member.role)) return res.status(403).json({ error: "insufficient_role" });
     const d = parsed.data;
-    const result = await withUserTransaction(req.authUser!.id, (client) => client.query(
-      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,$2,$3,$4,$5,$6,'created',$7,$8) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider,merchant_reference,amount_minor,currency,status,created_at",
-      [tenantId,d.provider,d.merchantReference,idempotencyKey,d.amountMinor,d.currency,d.payerReference ?? null,d.description ?? null],
-    ));
-    if (result.rows[0]) {
-      await withUserTransaction(req.authUser!.id, (client) => client.query(
-        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,correlation_id,metadata) values($1,$2,'transaction.created','transaction',$3,$4,$5::jsonb)",
-        [tenantId,req.authUser!.id,result.rows[0].id,randomUUID(),JSON.stringify({ provider: d.provider, amountMinor: d.amountMinor })],
-      ));
-      return res.status(201).json({ transaction: result.rows[0], idempotentReplay: false });
-    }
-    const existing = await withUserTransaction(req.authUser!.id, (client) => client.query(
-      "select id,provider,merchant_reference,amount_minor,currency,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
-      [tenantId,idempotencyKey],
-    ));
-    if (!existing.rows[0]) return res.status(409).json({ error: "idempotency_conflict" });
-    const row = existing.rows[0];
+    const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
+      const inserted = await client.query(
+        "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,payer_reference,description) values($1,$2,$3,$4,$5,$6,'created',$7,$8) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id,provider,merchant_reference,amount_minor,currency,status,created_at",
+        [tenantId,d.provider,d.merchantReference,idempotencyKey,d.amountMinor,d.currency,d.payerReference ?? null,d.description ?? null],
+      );
+      if (inserted.rows[0]) {
+        await client.query(
+          "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,correlation_id,metadata) values($1,$2,'transaction.created','transaction',$3,$4,$5::jsonb)",
+          [tenantId,req.authUser!.id,inserted.rows[0].id,randomUUID(),JSON.stringify({ provider: d.provider, amountMinor: d.amountMinor })],
+        );
+        return { row: inserted.rows[0], created: true };
+      }
+      const existing = await client.query(
+        "select id,provider,merchant_reference,amount_minor,currency,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        [tenantId,idempotencyKey],
+      );
+      return { row: existing.rows[0], created: false };
+    });
+    if (outcome.created) return res.status(201).json({ transaction: outcome.row, idempotentReplay: false });
+    if (!outcome.row) return res.status(409).json({ error: "idempotency_conflict" });
+    const row = outcome.row;
     if (row.provider !== d.provider || row.merchant_reference !== d.merchantReference || Number(row.amount_minor) !== d.amountMinor || row.currency !== d.currency) {
       return res.status(409).json({ error: "idempotency_key_reused_with_different_request" });
     }

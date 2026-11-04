@@ -187,32 +187,19 @@ router.post("/tenants/:tenantId/webhook-endpoints/:endpointId/disable", async (r
 router.post("/tenants", async (req, res, next) => {
   const parsed = createTenantSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
-  const client = await getPool().connect().catch(next);
-  if (!client) return;
   const userId = req.authUser!.id;
   try {
-    await client.query("begin");
-    const created = await client.query(
-      "insert into public.payment_tenants(name,slug) values($1,$2) returning id,name,slug,status,created_at",
-      [parsed.data.name, parsed.data.slug],
-    );
-    const tenant = created.rows[0];
-    await client.query(
-      "insert into public.payment_tenant_memberships(tenant_id,user_id,role,status) values($1,$2,'owner','active')",
-      [tenant.id, userId],
-    );
-    await client.query(
-      "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'tenant.created','tenant',$1,$3::jsonb)",
-      [tenant.id, userId, JSON.stringify({ slug: tenant.slug })],
-    );
-    await client.query("commit");
+    const tenant = await withUserTransaction(userId, async (client) => {
+      const created = await client.query("insert into public.payment_tenants(name,slug) values($1,$2) returning id,name,slug,status,created_at", [parsed.data.name, parsed.data.slug]);
+      const row = created.rows[0];
+      await client.query("insert into public.payment_tenant_memberships(tenant_id,user_id,role,status) values($1,$2,$3,$4)", [row.id, userId, "owner", "active"]);
+      await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,$3,$4,$1,$5::jsonb)", [row.id, userId, "tenant.created", "tenant", JSON.stringify({ slug: row.slug })]);
+      return row;
+    });
     return res.status(201).json({ tenant });
   } catch (error) {
-    await client.query("rollback").catch(() => undefined);
     if ((error as { code?: string }).code === "23505") return res.status(409).json({ error: "tenant_slug_taken" });
     return next(error);
-  } finally {
-    client.release();
   }
 });
 

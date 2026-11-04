@@ -5,6 +5,7 @@ const COOKIE = "mobiwave_platform_admin";
 const SESSION_SECONDS = 8 * 60 * 60;
 type Session = { username: string; iat: number; exp: number };
 const adminCapabilityBrand: unique symbol = Symbol("platform-admin-capability");
+const issuedAdminCapabilities = new WeakSet<object>();
 export interface PlatformAdminCapability {
   readonly username: string;
   readonly [adminCapabilityBrand]: true;
@@ -59,13 +60,18 @@ export function clearAdminSessionCookie(res: Response) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader("Set-Cookie", COOKIE + "=; Path=/api/admin; Max-Age=0; HttpOnly; SameSite=Strict" + secure);
 }
+export function isPlatformAdminCapability(value: unknown): value is PlatformAdminCapability {
+  return typeof value === "object" && value !== null && issuedAdminCapabilities.has(value);
+}
 export function requirePlatformAdmin(req: Request, res: Response, next: NextFunction) {
   try {
     const token = parseCookies(req.headers.cookie)[COOKIE];
     const session = verifyAdminSession(token);
     if (!session) return res.status(401).json({ error: "platform_admin_session_required" });
     req.platformAdmin = session;
-    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true as const });
+    const capability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true as const });
+    issuedAdminCapabilities.add(capability);
+    req.platformAdminCapability = capability;
     return next();
   } catch {
     return res.status(503).json({ error: "platform_admin_session_not_configured" });

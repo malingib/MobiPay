@@ -52,7 +52,7 @@ router.post("/tenants/:tenantId/daraja/stk-push", requireAuth, async (req,res,ne
     if (!member) return res.status(404).json({ error:"tenant_not_found" });
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({ error:"insufficient_role" });
     let providerCredentials: Record<string, string>;
-    try { providerCredentials = await getTenantProviderCredentials(tenantId, "daraja", {kind:"merchant",userId:req.authUser!.id}) as Record<string, string>; }
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "daraja", {kind:"merchant",capability:req.merchantDbCapability!}) as Record<string, string>; }
     catch { return res.status(409).json({ error: "daraja_not_connected", message: "Connect and verify this merchant’s Daraja sandbox credentials first." }); }
     if ((process.env.DARAJA_ENV ?? "sandbox") !== "sandbox") return res.status(403).json({ error:"live_payments_disabled" });
     const idempotencyKey = req.header("idempotency-key")?.trim();
@@ -99,7 +99,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     let providerCredentials: Record<string, string>;
-    try { providerCredentials = await getTenantProviderCredentials(tenantId, "pesapal", {kind:"merchant",userId:req.authUser!.id}) as Record<string, string>; }
+    try { providerCredentials = await getTenantProviderCredentials(tenantId, "pesapal", {kind:"merchant",capability:req.merchantDbCapability!}) as Record<string, string>; }
     catch { return res.status(409).json({ error: "pesapal_not_connected", message: "Connect and verify this merchant’s Pesapal sandbox credentials first." }); }
     if ((process.env.PESAPAL_ENV ?? "sandbox")!=="sandbox") return res.status(403).json({error:"live_payments_disabled"});
     const key=req.header("idempotency-key")?.trim();

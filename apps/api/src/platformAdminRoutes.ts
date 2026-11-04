@@ -11,7 +11,7 @@ router.use(requirePlatformAdmin);
 router.get("/overview", async (_req, res, next) => {
   try {
     const [tenants, transactions, providers, exceptions] = await Promise.all([
-      getPool().query(`select count(*)::int as total,
+      client.query(`select count(*)::int as total,
         count(*) filter (where status='active')::int as active,
         count(*) filter (where status='suspended')::int as suspended from public.payment_tenants`),
       getPool().query(`select count(*)::int as total,
@@ -30,7 +30,7 @@ router.get("/overview", async (_req, res, next) => {
 router.get("/tenants", async (req, res, next) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 120) : "";
   try {
-    const result = await getPool().query(`
+    const tenants = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {\n    const result = await client.query(`
       select t.id,t.name,t.slug,t.status,t.created_at,
         (select count(*)::int from public.payment_tenant_memberships m where m.tenant_id=t.id and m.status='active') as members,
         (select count(*)::int from public.payment_transactions tx where tx.tenant_id=t.id) as transactions,
@@ -38,18 +38,18 @@ router.get("/tenants", async (req, res, next) => {
       from public.payment_tenants t
       where ($1='' or t.name ilike '%'||$1||'%' or t.slug ilike '%'||$1||'%')
       order by t.created_at desc limit 250`, [q]);
-    return res.json({ tenants: result.rows });
+    return result.rows;\n    });\n    return res.json({ tenants });
   } catch (error) { return next(error); }
 });
 router.get("/transactions", async (req, res, next) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
   try {
-    const result = await getPool().query(`
+    const transactions = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {\n    const result = await client.query(`
       select tx.id,tx.tenant_id,t.name as tenant_name,tx.provider,tx.merchant_reference,
         tx.amount_minor,tx.currency,tx.status,tx.provider_receipt,tx.provider_status,tx.created_at,tx.confirmed_at
       from public.payment_transactions tx join public.payment_tenants t on t.id=tx.tenant_id
       order by tx.created_at desc limit $1`, [limit]);
-    return res.json({ transactions: result.rows });
+    return result.rows;\n    });\n    return res.json({ transactions });
   } catch (error) { return next(error); }
 });
 router.patch("/tenants/:tenantId/status", async (req, res, next) => {
@@ -64,10 +64,10 @@ router.patch("/tenants/:tenantId/status", async (req, res, next) => {
       "update public.payment_tenants set status=$1,updated_at=now() where id=$2 returning id,name,slug,status,updated_at",
       [parsed.data.status, tenantId],
     );
-    if (!result.rows[0]) { await client.query("rollback"); return res.status(404).json({ error: "tenant_not_found" }); }
+    if (!result.rows[0]) return null;
     await client.query(
       "insert into public.platform_admin_audit_logs(actor_username,action,entity_type,entity_id,metadata) values($1,$2,'tenant',$3,$4::jsonb)",
-      [adminUsername(req), parsed.data.status === "suspended" ? "tenant.suspended" : "tenant.activated", tenantId, JSON.stringify({ status: parsed.data.status, merchantName: result.rows[0].name })],
+      [actor, parsed.data.status === "suspended" ? "tenant.suspended" : "tenant.activated", tenantId, JSON.stringify({ status: parsed.data.status, merchantName: result.rows[0].name })],
     );
     await client.query("commit");
     return res.json({ tenant: result.rows[0] });

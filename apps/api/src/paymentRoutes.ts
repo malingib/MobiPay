@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getPool, withUserTransaction } from "./db.js";
+import { withUserTransaction } from "./db.js";
 import { requireAuth, merchantCapabilityUserId } from "./auth.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";

@@ -66,17 +66,15 @@ router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => 
     if (!member) return res.status(404).json({error:"tenant_not_found"});
     if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
     const sourceHash=sha256Statement(parsed.data.csvContent);
-    const client=await getPool().connect();
     try {
-      await client.query("begin");
+      const outcome = await withUserTransaction(req.authUser!.id, async (client) => {
       const created=await client.query(
         "insert into public.payment_reconciliation_runs(tenant_id,provider,source_name,source_sha256,status,rows_total,created_by) values($1,$2,$3,$4,'processing',$5,$6) on conflict (tenant_id,provider,source_sha256) do nothing returning id",
         [tenantId,parsed.data.provider,parsed.data.sourceName,sourceHash,rows.length,req.authUser!.id],
       );
       if (!created.rows[0]) {
         const existing=await client.query("select id,status,rows_total,rows_matched,rows_unmatched,rows_exception,created_at from public.payment_reconciliation_runs where tenant_id=$1 and provider=$2 and source_sha256=$3",[tenantId,parsed.data.provider,sourceHash]);
-        await client.query("commit");
-        return res.status(200).json({run:existing.rows[0],idempotentReplay:true});
+        return { run: existing.rows[0], idempotentReplay: true };
       }
       const runId=created.rows[0].id as string;
       const ledger=await client.query(
@@ -115,12 +113,9 @@ router.post("/tenants/:tenantId/reconciliation/import", async (req,res,next) => 
         "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'reconciliation.import.completed','reconciliation_run',$3,$4::jsonb)",
         [tenantId,req.authUser!.id,runId,JSON.stringify({provider:parsed.data.provider,sourceName:parsed.data.sourceName,sourceSha256:sourceHash,rowsTotal:rows.length,rowsMatched:matched,rowsUnmatched:unmatched,rowsException:exceptions})],
       );
-      await client.query("commit");
-      return res.status(201).json({run:updated.rows[0],idempotentReplay:false});
-    } catch(error) {
-      await client.query("rollback").catch(()=>undefined);
-      throw error;
-    } finally { client.release(); }
+      return { run: updated.rows[0], idempotentReplay: false };
+      });
+      return res.status(outcome.idempotentReplay ? 200 : 201).json(outcome);
   } catch(error) { return next(error); }
 });
 

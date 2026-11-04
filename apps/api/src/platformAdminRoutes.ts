@@ -8,6 +8,31 @@ const statusSchema = z.object({ status: z.enum(["active", "suspended"]) });
 const idSchema = z.string().uuid();
 router.use(requirePlatformAdmin);
 
+router.get("/security/database-role", async (req, res, next) => {
+  try {
+    const security = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {
+      const result = await client.query(`
+        select current_user as runtime_role,
+          r.rolsuper as is_superuser,
+          r.rolbypassrls as bypasses_rls,
+          (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+              and c.relowner=r.oid) as payment_tables_owned_by_runtime_role,
+          (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+              and c.relrowsecurity) as payment_tables_with_rls,
+          (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+              and c.relforcerowsecurity) as payment_tables_with_force_rls,
+          (select count(*)::int from pg_policies p where p.schemaname='public' and p.tablename like 'payment\\_%' escape '\\') as payment_policy_count
+        from pg_roles r where r.rolname=current_user
+      `);
+      return result.rows[0];
+    });
+    return res.json({ databaseSecurity: security });
+  } catch (error) { return next(error); }
+});
+
 router.get("/overview", async (req, res, next) => {
   try {
     const data = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {

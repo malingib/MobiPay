@@ -50,3 +50,14 @@ test("worker transaction rolls back and releases on failure", async () => {
   assert.deepEqual(f.calls, ["BEGIN", "ROLLBACK"]);
   assert.equal(f.released, 1);
 });
+
+test("merchant, provider-system and worker capabilities are non-interchangeable", async () => {
+  const f = fixture();
+  const merchant = issueMerchantDatabaseCapability("verified-user");
+  const provider = issueProviderSystemCapability("daraja", "tenant-a", "checkout-a");
+  const worker = issuePaymentWorkerCapability();
+  await withUserTransaction(merchant, async () => undefined, f.pool);
+  await assert.rejects(withUserTransaction(provider as never, async () => undefined, f.pool), /verified merchant database capability/);
+  await assert.rejects(withUserTransaction(worker as never, async () => undefined, f.pool), /verified merchant database capability/);
+  await assert.rejects(withUserTransaction({} as never, async () => undefined, f.pool), /verified merchant database capability/);
+});

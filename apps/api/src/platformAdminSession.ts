@@ -3,8 +3,17 @@ import type { NextFunction, Request, Response } from "express";
 
 const COOKIE = "mobiwave_platform_admin";
 const SESSION_SECONDS = 8 * 60 * 60;
-type Session = { username: string; iat: number; exp: number };\nconst adminCapabilityBrand: unique symbol = Symbol("platform-admin-capability");\nexport interface PlatformAdminCapability { readonly username: string; readonly [adminCapabilityBrand]: true }\ndeclare global { namespace Express { interface Request { platformAdminCapability?: PlatformAdminCapability } } }
-
+type Session = { username: string; iat: number; exp: number };
+const adminCapabilityBrand: unique symbol = Symbol("platform-admin-capability");
+export interface PlatformAdminCapability {
+  readonly username: string;
+  readonly [adminCapabilityBrand]: true;
+}
+declare global {
+  namespace Express {
+    interface Request { platformAdminCapability?: PlatformAdminCapability }
+  }
+}
 function secret() {
   const value = process.env.PLATFORM_ADMIN_SESSION_SECRET ?? "";
   if (value.length < 32) throw new Error("PLATFORM_ADMIN_SESSION_SECRET must contain at least 32 characters");
@@ -35,7 +44,10 @@ export function verifyAdminSession(token?: string): Session | null {
   try {
     if (!safeEqual(signature, sign(payload))) return null;
     const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Session;
-    if (!session.username || !Number.isInteger(session.exp) || session.exp <= Math.floor(Date.now() / 1000) || session.iat > Math.floor(Date.now() / 1000) + 60) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (!session.username || !Number.isInteger(session.iat) || session.iat < 0 ||
+        session.iat > now + 60 || !Number.isInteger(session.exp) ||
+        session.exp <= now || session.exp <= session.iat || session.exp - session.iat > SESSION_SECONDS) return null;
     return session;
   } catch { return null; }
 }
@@ -52,7 +64,7 @@ export function requirePlatformAdmin(req: Request, res: Response, next: NextFunc
     const token = parseCookies(req.headers.cookie)[COOKIE];
     const session = verifyAdminSession(token);
     if (!session) return res.status(401).json({ error: "platform_admin_session_required" });
-    (req as Request & { platformAdmin?: Session }).platformAdmin = session;\n    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true });
+    req.platformAdminCapability = Object.freeze({ username: session.username, [adminCapabilityBrand]: true });
     return next();
   } catch {
     return res.status(503).json({ error: "platform_admin_session_not_configured" });
@@ -65,5 +77,5 @@ export function verifyAdminCredentials(username: string, password: string) {
   return safeEqual(username.trim(), expectedUser) && safeEqual(password, expectedPassword);
 }
 export function adminUsername(req: Request) {
-  return (req as Request & { platformAdmin?: Session }).platformAdmin?.username ?? "unknown";
+  return req.platformAdminCapability?.username ?? "unknown";
 }

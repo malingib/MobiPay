@@ -44,7 +44,6 @@ async function membership(userId: string, tenantId: string) {
     );
     return result.rows[0] as { role: string } | undefined;
   });
-  return result.rows[0] as { role: string } | undefined;
 }
 
 function validTenantParam(value: string) {

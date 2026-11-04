@@ -190,10 +190,10 @@ async function persistProviderNotification(
     const evidenceMatches = terminalCode && amountMatches && currencyMatches &&
       (scope.provider !== "daraja" || (typeof verified.receipt === "string" && verified.receipt.length > 0));
 
-    if (evidenceMatches && ["created","pending","unknown"].includes(tx.status)) {
+    if (evidenceMatches && ["pending","unknown"].includes(tx.status)) {
       const outcome = scope.provider === "pesapal" && verified.code === 2 ? "failed" : "succeeded";
       await client.query(
-        "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('created','pending','unknown')",
+        "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('pending','unknown')",
         [outcome,scope.provider+"_status_query_verified",verified.receipt ?? null,tx.id,scope.tenantId],
       );
       await client.query(

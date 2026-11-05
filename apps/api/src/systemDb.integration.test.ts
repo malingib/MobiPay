@@ -65,3 +65,72 @@ test("PostgreSQL SKIP LOCKED claims exclude a competing worker and stale leases 
     await pool.end();
   }
 });
+
+
+test("PostgreSQL concurrent callback event inserts are idempotent", async () => {
+  if (!connectionString) return;
+  const pool = new pg.Pool({ connectionString, max: 4 });
+  const slug = "callback-dedupe-" + randomUUID().replaceAll("-", "");
+  const tenant = (await pool.query("insert into public.payment_tenants(name,slug) values('callback dedupe',$1) returning id", [slug])).rows[0].id as string;
+  const eventId = "dedupe-" + randomUUID();
+  const first = await pool.connect();
+  const second = await pool.connect();
+  try {
+    await first.query("begin");
+    const insertSql = "insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status) values($1,'daraja',$2,'stk_callback',$3,'{}'::jsonb,'received') on conflict(tenant_id,provider,provider_event_id) do nothing returning id";
+    const initial = await first.query(insertSql, [tenant,eventId,"b".repeat(64)]);
+    assert.equal(initial.rowCount, 1);
+    const duplicatePromise = second.query(insertSql, [tenant,eventId,"b".repeat(64)]);
+    await first.query("commit");
+    const duplicate = await duplicatePromise;
+    assert.equal(duplicate.rowCount, 0);
+    const count = await pool.query("select count(*)::int as count from public.payment_provider_events where tenant_id=$1 and provider='daraja' and provider_event_id=$2", [tenant,eventId]);
+    assert.equal(count.rows[0].count, 1);
+  } finally {
+    await first.query("rollback").catch(() => undefined);
+    first.release();
+    second.release();
+    await pool.query("delete from public.payment_provider_events where tenant_id=$1", [tenant]);
+    await pool.query("delete from public.payment_tenants where id=$1", [tenant]);
+    await pool.end();
+  }
+});
+
+test("PostgreSQL provider recovery leases exclude competing workers and reject stale completion", async () => {
+  if (!connectionString) return;
+  const pool = new pg.Pool({ connectionString, max: 4 });
+  const slug = "provider-lease-" + randomUUID().replaceAll("-", "");
+  const tenant = (await pool.query("insert into public.payment_tenants(name,slug) values('provider lease',$1) returning id", [slug])).rows[0].id as string;
+  const eventId = "lease-" + randomUUID();
+  const event = (await pool.query(
+    "insert into public.payment_provider_events(tenant_id,provider,provider_event_id,event_type,payload_sha256,payload,processing_status) values($1,'pesapal',$2,'ipn','" + "c".repeat(64) + "','{}'::jsonb,'retry') returning id",
+    [tenant,eventId],
+  )).rows[0].id as string;
+  const first = await pool.connect();
+  const second = await pool.connect();
+  const ownerToken = randomUUID();
+  const staleToken = randomUUID();
+  try {
+    await first.query("begin");
+    const claim1 = await first.query("select id from public.payment_provider_events where id=$1 for update skip locked", [event]);
+    assert.equal(claim1.rowCount, 1);
+    await second.query("begin");
+    const claim2 = await second.query("select id from public.payment_provider_events where id=$1 for update skip locked", [event]);
+    assert.equal(claim2.rowCount, 0);
+    await first.query("update public.payment_provider_events set processing_status='received',processing_attempts=processing_attempts+1,processing_started_at=now(),claim_token=$2,lease_expires_at=now()+interval '5 minutes' where id=$1", [event,ownerToken]);
+    await first.query("commit");
+    const stale = await second.query("update public.payment_provider_events set processing_status='processed',claim_token=null,lease_expires_at=null where id=$1 and claim_token=$2", [event,staleToken]);
+    assert.equal(stale.rowCount, 0);
+    await second.query("commit");
+    const owner = await pool.query("update public.payment_provider_events set processing_status='processed',processed_at=now(),processing_started_at=null,claim_token=null,lease_expires_at=null where id=$1 and claim_token=$2", [event,ownerToken]);
+    assert.equal(owner.rowCount, 1);
+  } finally {
+    await first.query("rollback").catch(() => undefined);
+    await second.query("rollback").catch(() => undefined);
+    first.release();
+    second.release();
+    await pool.query("delete from public.payment_provider_events where id=$1", [event]);
+    await pool.query("delete from public.payment_tenants where id=$1", [tenant]);
+    await pool.end();
+  }
+});

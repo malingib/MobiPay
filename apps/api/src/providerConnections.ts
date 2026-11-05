@@ -2,8 +2,11 @@ import { Router } from "express";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
-import { getPool } from "./db.js";
-import { requireAuth } from "./auth.js";
+import { withUserTransaction } from "./db.js";
+import { withPaymentWorkerTransaction, withProviderSystemTransaction } from "./systemDb.js";
+import type { PaymentWorkerCapability, ProviderSystemCapability } from "./systemDb.js";
+import { requireAuth, merchantCapabilityUserId } from "./auth.js";
+import type { MerchantDatabaseCapability } from "./auth.js";
 
 const router = Router();
 const idSchema = z.string().uuid();
@@ -47,12 +50,16 @@ export function decryptProviderCredentials(payload: string): ProviderCredentials
   return JSON.parse(clear) as ProviderCredentials;
 }
 
-async function memberRole(userId: string, tenantId: string) {
-  const result = await getPool().query(
-    "select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
-    [userId, tenantId],
-  );
-  return result.rows[0]?.role as string | undefined;
+async function memberRole(capability: MerchantDatabaseCapability, tenantId: string) {
+  const userId = merchantCapabilityUserId(capability);
+  if (!userId) throw new Error("Verified merchant capability is required");
+  return withUserTransaction(capability, async (client) => {
+    const result = await client.query(
+      "select m.role from public.payment_tenant_memberships m join public.payment_tenants t on t.id=m.tenant_id where m.user_id=$1 and m.tenant_id=$2 and m.status='active' and t.status='active'",
+      [userId, tenantId],
+    );
+    return result.rows[0]?.role as string | undefined;
+  });
 }
 
 async function verifySandbox(provider: "daraja" | "pesapal", credentials: ProviderCredentials) {
@@ -87,11 +94,11 @@ router.get("/tenants/:tenantId/provider-connections", async (req, res, next) => 
   const tenantId = String(req.params.tenantId ?? "");
   if (!idSchema.safeParse(tenantId).success) return res.status(400).json({ error: "invalid_tenant_id" });
   try {
-    if (!await memberRole(req.authUser!.id, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
-    const result = await getPool().query(
+    if (!await memberRole(req.merchantDbCapability!, tenantId)) return res.status(404).json({ error: "tenant_not_found" });
+    const result = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select provider,connection_status,enabled,environment,last_tested_at,last_error_code,updated_at from public.payment_provider_configs where tenant_id=$1 and account_reference='primary' order by provider",
       [tenantId],
-    );
+    ));
     return res.json({ connections: result.rows });
   } catch (error) { return next(error); }
 });
@@ -103,24 +110,27 @@ router.put("/tenants/:tenantId/provider-connections/:provider", async (req, res,
   const parsed = providerParsed.data === "daraja" ? darajaCredentials.safeParse(req.body) : pesapalCredentials.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_credentials", details: parsed.error.flatten() });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
     let encrypted: string;
     try { encrypted = encryptProviderCredentials(parsed.data); }
     catch { return res.status(503).json({ error: "credential_encryption_unavailable", message: "Provider credential encryption is not configured correctly." }); }
-    const result = await getPool().query(
-      `insert into public.payment_provider_configs(tenant_id,provider,account_reference,secret_reference,environment,enabled,encrypted_credentials,connection_status,last_error_code,created_by,updated_at)
-       values($1,$2,'primary','db-encrypted:aes-256-gcm:v1','sandbox',false,$3,'configured',null,$4,now())
-       on conflict (tenant_id,provider) where account_reference='primary'
-       do update set secret_reference='db-encrypted:aes-256-gcm:v1',environment='sandbox',enabled=false,encrypted_credentials=excluded.encrypted_credentials,connection_status='configured',last_tested_at=null,last_error_code=null,created_by=excluded.created_by,updated_at=now()
-       returning provider,connection_status,enabled,environment,updated_at`,
-      [tenantId, providerParsed.data, encrypted, req.authUser!.id],
-    );
-    await getPool().query(
-      "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.credentials.updated','provider_config',$3::jsonb)",
-      [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data, environment: "sandbox" })],
-    );
+    const result = await withUserTransaction(req.merchantDbCapability!, async (client) => {
+      const saved = await client.query(
+        `insert into public.payment_provider_configs(tenant_id,provider,account_reference,secret_reference,environment,enabled,encrypted_credentials,connection_status,last_error_code,created_by,updated_at)
+         values($1,$2,'primary','db-encrypted:aes-256-gcm:v1','sandbox',false,$3,'configured',null,$4,now())
+         on conflict (tenant_id,provider) where account_reference='primary'
+         do update set secret_reference='db-encrypted:aes-256-gcm:v1',environment='sandbox',enabled=false,encrypted_credentials=excluded.encrypted_credentials,connection_status='configured',last_tested_at=null,last_error_code=null,created_by=excluded.created_by,updated_at=now()
+         returning provider,connection_status,enabled,environment,updated_at`,
+        [tenantId, providerParsed.data, encrypted, req.authUser!.id],
+      );
+      await client.query(
+        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.credentials.updated','provider_config',$3::jsonb)",
+        [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data, environment: "sandbox" })],
+      );
+      return saved;
+    });
     return res.status(200).json({ connection: result.rows[0], message: "Credentials encrypted and saved. Test the connection before enabling it." });
   } catch (error) { return next(error); }
 });
@@ -130,33 +140,36 @@ router.post("/tenants/:tenantId/provider-connections/:provider/test", providerTe
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
-    const found = await getPool().query(
+    const found = await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
       "select encrypted_credentials from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary' and encrypted_credentials is not null",
       [tenantId, providerParsed.data],
-    );
+    ));
     if (!found.rows[0]) return res.status(404).json({ error: "provider_credentials_not_found" });
     let credentials: ProviderCredentials;
     try { credentials = decryptProviderCredentials(String(found.rows[0].encrypted_credentials)); }
     catch { return res.status(503).json({ error: "credential_decryption_failed", message: "Credentials could not be decrypted. Verify the encryption key has not changed." }); }
     try {
       await verifySandbox(providerParsed.data, credentials);
-      const updated = await getPool().query(
-        "update public.payment_provider_configs set connection_status='verified',enabled=true,last_tested_at=now(),last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,environment,last_tested_at,updated_at",
-        [tenantId, providerParsed.data],
-      );
-      await getPool().query(
-        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.connection.verified','provider_config',$3::jsonb)",
-        [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data, environment: "sandbox" })],
-      );
+      const updated = await withUserTransaction(req.merchantDbCapability!, async (client) => {
+        const saved = await client.query(
+          "update public.payment_provider_configs set connection_status='verified',enabled=true,last_tested_at=now(),last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,environment,last_tested_at,updated_at",
+          [tenantId, providerParsed.data],
+        );
+        await client.query(
+          "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.connection.verified','provider_config',$3::jsonb)",
+          [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data, environment: "sandbox" })],
+        );
+        return saved;
+      });
       return res.json({ connection: updated.rows[0], message: "Sandbox credentials verified. This verifies authentication only; a live payment has not been tested." });
     } catch {
-      await getPool().query(
+      await withUserTransaction(req.merchantDbCapability!, (client) => client.query(
         "update public.payment_provider_configs set connection_status='error',enabled=false,last_tested_at=now(),last_error_code='provider_credentials_rejected',updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary'",
         [tenantId, providerParsed.data],
-      );
+      ));
       return res.status(422).json({ error: "provider_credentials_rejected", message: "The provider rejected these sandbox credentials. Check the credentials and environment in the provider portal." });
     }
   } catch (error) { return next(error); }
@@ -167,27 +180,51 @@ router.delete("/tenants/:tenantId/provider-connections/:provider", async (req, r
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });
   try {
-    const role = await memberRole(req.authUser!.id, tenantId);
+    const role = await memberRole(req.merchantDbCapability!, tenantId);
     if (!role) return res.status(404).json({ error: "tenant_not_found" });
     if (!["owner", "admin"].includes(role)) return res.status(403).json({ error: "insufficient_role" });
-    const result = await getPool().query(
-      "update public.payment_provider_configs set enabled=false,connection_status='disabled',encrypted_credentials=null,last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,updated_at",
-      [tenantId, providerParsed.data],
-    );
+    const result = await withUserTransaction(req.merchantDbCapability!, async (client) => {
+      const removed = await client.query(
+        "update public.payment_provider_configs set enabled=false,connection_status='disabled',encrypted_credentials=null,last_error_code=null,updated_at=now() where tenant_id=$1 and provider=$2 and account_reference='primary' returning provider,connection_status,enabled,updated_at",
+        [tenantId, providerParsed.data],
+      );
+      if (!removed.rows[0]) return removed;
+      await client.query(
+        "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.connection.removed','provider_config',$3::jsonb)",
+        [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data })],
+      );
+      return removed;
+    });
     if (!result.rows[0]) return res.status(404).json({ error: "provider_connection_not_found" });
-    await getPool().query(
-      "insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,metadata) values($1,$2,'provider.connection.removed','provider_config',$3::jsonb)",
-      [tenantId, req.authUser!.id, JSON.stringify({ provider: providerParsed.data })],
-    );
     return res.json({ connection: result.rows[0] });
   } catch (error) { return next(error); }
 });
 
-export async function getTenantProviderCredentials(tenantId: string, provider: "daraja" | "pesapal"): Promise<ProviderCredentials> {
-  const result = await getPool().query(
+type ProviderCredentialAccess =
+  | { kind: "merchant"; capability: MerchantDatabaseCapability }
+  | { kind: "provider"; capability: ProviderSystemCapability }
+  | { kind: "worker"; capability: PaymentWorkerCapability };
+
+export async function getTenantProviderCredentials(
+  tenantId: string,
+  provider: "daraja" | "pesapal",
+  access: ProviderCredentialAccess,
+): Promise<ProviderCredentials> {
+  const read = async (client: import("pg").PoolClient) => client.query(
     "select encrypted_credentials,connection_status,enabled from public.payment_provider_configs where tenant_id=$1 and provider=$2 and account_reference='primary'",
     [tenantId, provider],
   );
+  let result: import("pg").QueryResult;
+  if (access.kind === "merchant") {
+    result = await withUserTransaction(access.capability, read);
+  } else if (access.kind === "provider") {
+    result = await withProviderSystemTransaction(access.capability, async (client, scope) => {
+      if (scope.tenantId !== tenantId || scope.provider !== provider) throw new Error("Provider capability scope mismatch");
+      return read(client);
+    });
+  } else {
+    result = await withPaymentWorkerTransaction(access.capability, read);
+  }
   const row = result.rows[0];
   if (!row || !row.encrypted_credentials || row.connection_status !== "verified" || row.enabled !== true) {
     throw new Error("merchant_provider_not_connected");

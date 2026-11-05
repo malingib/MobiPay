@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { getPool } from "./db.js";
+import { issuePaymentWorkerCapability, newLeaseToken, withPaymentWorkerTransaction } from "./systemDb.js";
 
 const MAX_ATTEMPTS = 8;
 const DELIVERY_TIMEOUT_MS = 8_000;
@@ -51,35 +51,31 @@ function resolveSecret(reference: string): string {
   return value;
 }
 
-/** Deliver a bounded batch. Safe to run repeatedly; rows are claimed using SKIP LOCKED. */
+/** Deliver a bounded batch with per-attempt lease ownership and compare-and-set completion. */
 export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promise<{ delivered: number; retried: number; deadLettered: number }> {
   const counts = { delivered: 0, retried: 0, deadLettered: 0 };
+  const workerCapability = issuePaymentWorkerCapability();
   for (let i = 0; i < Math.max(1, Math.min(100, batchSize)); i++) {
-    const client = await getPool().connect();
-    let delivery: { id: string; endpoint_id: string; event_id: string; event_type: string; payload: unknown; attempts: number; url: string; signing_secret_reference: string } | undefined;
-    try {
-      await client.query("begin");
+    const leaseToken = newLeaseToken();
+    const delivery = await withPaymentWorkerTransaction(workerCapability, async (client) => {
       const selected = await client.query(
         `select d.id,d.endpoint_id,d.event_id,d.event_type,d.payload,d.attempts,e.url,e.signing_secret_reference
          from public.payment_merchant_webhook_deliveries d
-         join public.payment_merchant_webhook_endpoints e on e.id=d.endpoint_id and e.enabled=true
-         where ((d.status in ('pending','retry') and d.next_attempt_at <= now()) or (d.status='delivering' and d.claimed_at < now()-interval '5 minutes'))
+         join public.payment_merchant_webhook_endpoints e on e.id=d.endpoint_id and e.tenant_id=d.tenant_id and e.enabled=true
+         where ((d.status in ('pending','retry') and d.next_attempt_at <= now()) or
+           (d.status='delivering' and (d.lease_expires_at <= now() or d.lease_expires_at is null)))
          order by d.next_attempt_at,d.created_at
          limit 1 for update of d skip locked`,
       );
-      delivery = selected.rows[0];
-      if (!delivery) { await client.query("commit"); break; }
+      const row = selected.rows[0];
+      if (!row) return undefined;
       await client.query(
-        "update public.payment_merchant_webhook_deliveries set status='delivering',attempts=attempts+1,claimed_at=now(),updated_at=now(),last_error=null where id=$1",
-        [delivery.id],
+        "update public.payment_merchant_webhook_deliveries set status='delivering',attempts=attempts+1,claimed_at=now(),claim_token=$2,lease_expires_at=now()+interval '2 minutes',updated_at=now(),last_error=null where id=$1",
+        [row.id,leaseToken],
       );
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+      return { ...row, claim_token: leaseToken };
+    });
+    if (!delivery) break;
 
     const attempt = Number(delivery.attempts) + 1;
     try {
@@ -101,21 +97,24 @@ export async function processDueMerchantWebhookDeliveries(batchSize = 20): Promi
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
       });
       if (!response.ok) throw Object.assign(new Error(`Webhook endpoint returned HTTP ${response.status}`), { status: response.status });
-      await getPool().query(
-        "update public.payment_merchant_webhook_deliveries set status='delivered',last_http_status=$2,delivered_at=now(),claimed_at=null,updated_at=now(),last_error=null where id=$1",
-        [delivery.id,response.status],
-      );
+      const completed = await withPaymentWorkerTransaction(workerCapability, async (client) => client.query(
+        "update public.payment_merchant_webhook_deliveries set status='delivered',last_http_status=$3,delivered_at=now(),claimed_at=null,claim_token=null,lease_expires_at=null,updated_at=now(),last_error=null where id=$1 and claim_token=$2 and status='delivering' returning id",
+        [delivery.id,leaseToken,response.status],
+      ));
+      if (!completed.rowCount) throw new Error("Webhook delivery lease was lost before completion");
       counts.delivered++;
     } catch (error) {
       const status = (error as { status?: number }).status ?? null;
       const message = (error instanceof Error ? error.message : "Unknown webhook delivery error").slice(0, 1000);
       const dead = attempt >= MAX_ATTEMPTS;
       const delaySeconds = Math.min(21_600, 30 * (2 ** Math.min(attempt - 1, 10)));
-      await getPool().query(
-        "update public.payment_merchant_webhook_deliveries set status=$2,last_http_status=$3,last_error=$4,claimed_at=null,updated_at=now(),next_attempt_at=now()+($5 * interval '1 second') where id=$1",
-        [delivery.id,dead ? "dead_letter" : "retry",status,message,delaySeconds],
-      );
-      if (dead) counts.deadLettered++; else counts.retried++;
+      const updated = await withPaymentWorkerTransaction(workerCapability, async (client) => client.query(
+        "update public.payment_merchant_webhook_deliveries set status=$3,last_http_status=$4,last_error=$5,claimed_at=null,claim_token=null,lease_expires_at=null,updated_at=now(),next_attempt_at=now()+($6 * interval '1 second') where id=$1 and claim_token=$2 and status='delivering' returning id",
+        [delivery.id,leaseToken,dead ? "dead_letter" : "retry",status,message,delaySeconds],
+      ));
+      if (updated.rowCount) {
+        if (dead) counts.deadLettered++; else counts.retried++;
+      }
     }
   }
   return counts;

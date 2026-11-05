@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createAdminSession, verifyAdminSession, verifyAdminCredentials } from "./platformAdminSession.js";
+import { createAdminSession, verifyAdminSession, verifyAdminCredentials, requirePlatformAdmin, isPlatformAdminCapability } from "./platformAdminSession.js";
 
 test("platform admin session is signed and identifies the administrator", () => {
   const prior = process.env.PLATFORM_ADMIN_SESSION_SECRET;
@@ -27,5 +27,24 @@ test("platform admin credentials are independent of merchant identity claims", (
   } finally {
     if (priorUser === undefined) delete process.env.ADMIN_USERNAME; else process.env.ADMIN_USERNAME = priorUser;
     if (priorPassword === undefined) delete process.env.ADMIN_PASSWORD; else process.env.ADMIN_PASSWORD = priorPassword;
+  }
+});
+
+test("only middleware-issued platform admin capabilities pass runtime validation", () => {
+  const prior = process.env.PLATFORM_ADMIN_SESSION_SECRET;
+  process.env.PLATFORM_ADMIN_SESSION_SECRET = "test-session-secret-that-is-long-enough-123456";
+  try {
+    const token = createAdminSession("ops");
+    const req = { headers: { cookie: "mobiwave_platform_admin=" + token } } as any;
+    const res = { status() { return this; }, json() { return this; } } as any;
+    let continued = false;
+    requirePlatformAdmin(req, res, () => { continued = true; });
+    assert.equal(continued, true);
+    assert.equal(isPlatformAdminCapability(req.platformAdminCapability), true);
+    assert.equal(isPlatformAdminCapability({ username: "ops" }), false);
+    assert.equal(isPlatformAdminCapability(undefined), false);
+  } finally {
+    if (prior === undefined) delete process.env.PLATFORM_ADMIN_SESSION_SECRET;
+    else process.env.PLATFORM_ADMIN_SESSION_SECRET = prior;
   }
 });

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Pool, PoolClient } from "pg";
+import { issueMerchantDatabaseCapability } from "./auth.js";
+import { withUserTransaction } from "./db.js";
 import {
   issuePaymentWorkerCapability,
   issueProviderSystemCapability,

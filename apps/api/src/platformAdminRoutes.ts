@@ -7,6 +7,43 @@ const router = Router();
 const statusSchema = z.object({ status: z.enum(["active", "suspended"]) });
 const idSchema = z.string().uuid();
 router.use(requirePlatformAdmin);
+router.get("/security/database-role", async (_req, res, next) => {
+  try {
+    // Read-only diagnostics: no schema, data, role, or grant changes.
+    const result = await getPool().query(`
+      select current_user as runtime_role,
+        r.rolsuper as is_superuser,
+        r.rolbypassrls as bypasses_rls,
+        (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+          where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+            and c.relowner=r.oid) as payment_tables_owned_by_runtime_role,
+        (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+          where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+            and c.relrowsecurity) as payment_tables_with_rls,
+        (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace
+          where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\'
+            and c.relforcerowsecurity) as payment_tables_with_force_rls,
+        (select count(*)::int from pg_policies p where p.schemaname='public' and p.tablename like 'payment\\_%' escape '\\') as payment_policy_count,
+        (select coalesce(jsonb_agg(jsonb_build_object(
+          'table', c.relname,
+          'owner', pg_get_userbyid(c.relowner),
+          'rls_enabled', c.relrowsecurity,
+          'rls_forced', c.relforcerowsecurity,
+          'select', has_table_privilege(current_user, c.oid, 'SELECT'),
+          'insert', has_table_privilege(current_user, c.oid, 'INSERT'),
+          'update', has_table_privilege(current_user, c.oid, 'UPDATE'),
+          'delete', has_table_privilege(current_user, c.oid, 'DELETE'),
+          'truncate', has_table_privilege(current_user, c.oid, 'TRUNCATE'),
+          'references', has_table_privilege(current_user, c.oid, 'REFERENCES'),
+          'trigger', has_table_privilege(current_user, c.oid, 'TRIGGER')
+        ) order by c.relname), '[]'::jsonb)
+        from pg_class c join pg_namespace n on n.oid=c.relnamespace
+        where n.nspname='public' and c.relkind in ('r','p') and c.relname like 'payment\\_%' escape '\\') as payment_table_privileges
+      from pg_roles r where r.rolname=current_user
+    `);
+    return res.json({ databaseSecurity: result.rows[0] });
+  } catch (error) { return next(error); }
+});
 
 router.get("/overview", async (_req, res, next) => {
   try {

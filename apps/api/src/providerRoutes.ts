@@ -185,7 +185,16 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
       [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.description,providerReference,tokenHash],
     ));
     const transactionId=inserted.rows[0]?.id as string | undefined;
-    if (!transactionId) return res.status(409).json({error:"idempotency_conflict",message:"A concurrent request used this idempotency key. Retry the same request to retrieve its result."});
+    if (!transactionId) {
+      const raced=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
+        "select id,provider,merchant_reference,amount_minor,description,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        [tenantId,idempotencyKey],
+      ));
+      const row=raced.rows[0];
+      if(!row || row.provider!=="paystack" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if(row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,reference:row.provider_payment_reference,idempotentReplay:true});
+      return res.status(202).json({transactionId:row.id,status:row.status,message:"The first request is still initializing or reconciling this checkout. Do not create another payment."});
+    }
     try {
       const webBase=(process.env.PUBLIC_WEB_BASE_URL ?? "https://pay.mobiwave.co.ke").replace(/\/$/,"");
       if (!webBase.startsWith("https://")) throw new Error("PUBLIC_WEB_BASE_URL must use HTTPS");
@@ -195,12 +204,12 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
         metadata:{tenantId,transactionId,merchantReference:d.merchantReference},
       },credentials);
       await withUserTransaction(req.merchantDbCapability!,async(client)=>{
-        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status=case when status in ('created','unknown') then 'pending' else status end,provider_status='checkout_created',provider_verification_next_at=now()+interval '60 seconds',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status=case when status in ('created','unknown') then 'pending' else status end,provider_status=case when status in ('created','pending','unknown') then 'checkout_created' else provider_status end,provider_verification_next_at=case when status in ('created','pending','unknown') then now()+interval '60 seconds' else provider_verification_next_at end,updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
         await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'paystack.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({reference:provider.reference})]);
       });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.authorizationUrl,reference:provider.reference,message:"Paystack hosted checkout created. Payment remains pending until signed webhook and independent verification."});
     } catch {
-      await withUserTransaction(req.merchantDbCapability!,(client)=>client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[transactionId,tenantId]));
+      await withUserTransaction(req.merchantDbCapability!,(client)=>client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',provider_verification_next_at=now(),provider_verification_last_error='checkout_initialization_result_unknown',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[transactionId,tenantId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Paystack checkout outcome is uncertain. Reconcile before retrying with a new idempotency key."});
     }
   } catch(error) { return next(error); }

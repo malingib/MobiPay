@@ -38,3 +38,28 @@ begin
   ) then raise exception 'Paystack recovery queue index is missing'; end if;
 end;
 $$;
+
+do $race$
+declare
+  tenant_id uuid;
+  transaction_id uuid;
+  affected integer;
+begin
+  insert into public.payment_tenants(name,slug)
+    values('Paystack lease race','paystack-race-'||replace(gen_random_uuid()::text,'-',''))
+    returning id into tenant_id;
+  insert into public.payment_transactions(tenant_id,provider,merchant_reference,amount_minor,currency,status,provider_payment_reference,provider_verification_lease_token)
+    values(tenant_id,'paystack','paystack-lease-race',1000,'KES','pending','mp-lease-race','stale-lease')
+    returning id into transaction_id;
+  update public.payment_transactions
+    set status='succeeded',provider_status='success'
+    where id=transaction_id;
+  update public.payment_transactions
+    set status='pending',provider_status='pending'
+    where id=transaction_id
+      and provider_verification_lease_token='stale-lease'
+      and status in ('pending','unknown');
+  get diagnostics affected = row_count;
+  if affected<>0 then raise exception 'Stale Paystack recovery lease overwrote a terminal transaction'; end if;
+end;
+$race$;

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { withUserTransaction } from "./db.js";
 import { issueProviderSystemCapability, withProviderSystemTransaction } from "./systemDb.js";
@@ -9,7 +9,8 @@ import { randomUUID } from "node:crypto";
 import { requireAuth, merchantCapabilityUserId } from "./auth.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
-import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder } from "./providers.js";
+import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder, initiatePaystackCheckout, verifyPaystackTransaction } from "./providers.js";
+import type { PaystackCredentials } from "./providers.js";
 
 const router = Router();
 const idSchema = z.string().uuid();
@@ -18,6 +19,12 @@ const stkSchema = z.object({
   amountMinor: z.number().int().positive().max(10_000_000).refine((n) => n % 100 === 0, "M-Pesa STK amount must be whole KES"),
   merchantReference: z.string().trim().min(1).max(120),
   description: z.string().trim().max(100).default("MobiWave payment"),
+});
+const paystackSchema = z.object({
+  amountMinor: z.number().int().positive().max(100_000_000),
+  merchantReference: z.string().trim().min(1).max(120),
+  description: z.string().trim().min(1).max(200),
+  email: z.string().email(),
 });
 const pesapalSchema = z.object({
   amountMinor: z.number().int().positive().max(100_000_000),
@@ -133,8 +140,80 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
   } catch(error) { return next(error); }
 });
 
+
+router.get("/public/checkout/:tenantId/:token", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? "");
+  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9_-]{40,64}$/.test(token)) return res.status(404).json({error:"checkout_not_found"});
+  try {
+    const tokenHash=createHash("sha256").update(token).digest("hex");
+    const result=await withProviderSystemTransaction(issueProviderSystemCapability("paystack",tenantId,token),async(client)=>{
+      return client.query(
+        "select id,provider,merchant_reference,amount_minor,currency,status,provider_receipt,confirmed_at,created_at from public.payment_transactions where tenant_id=$1 and public_checkout_token_hash=$2 and public_checkout_expires_at>now()",
+        [tenantId,tokenHash],
+      );
+    });
+    const row=result.rows[0];
+    if (!row) return res.status(404).json({error:"checkout_not_found"});
+    return res.json({transaction:{id:row.id,provider:row.provider,reference:row.merchant_reference,amountMinor:Number(row.amount_minor),currency:row.currency,status:row.status,receipt:row.provider_receipt,confirmedAt:row.confirmed_at,createdAt:row.created_at}});
+  } catch(error) { return next(error); }
+});
+
+router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  const parsed=paystackSchema.safeParse(req.body);
+  if (!idSchema.safeParse(tenantId).success || !parsed.success) return res.status(400).json({error:"invalid_request",details:parsed.success ? undefined : parsed.error.flatten()});
+  try {
+    const member=await getMembership(req.merchantDbCapability!,tenantId);
+    if (!member) return res.status(404).json({error:"tenant_not_found"});
+    if (!["owner","admin","finance"].includes(member.role)) return res.status(403).json({error:"insufficient_role"});
+    let credentials: PaystackCredentials;
+    try { credentials=await getTenantProviderCredentials(tenantId,"paystack",{kind:"merchant",capability:req.merchantDbCapability!}) as PaystackCredentials; }
+    catch { return res.status(409).json({error:"paystack_not_connected",message:"Connect and verify this merchant's Paystack sandbox credentials first."}); }
+    if ((process.env.PAYSTACK_ENV ?? "sandbox")!=="sandbox") return res.status(403).json({error:"live_payments_disabled"});
+    const idempotencyKey=req.header("idempotency-key")?.trim();
+    if (!idempotencyKey || idempotencyKey.length>160) return res.status(400).json({error:"idempotency_key_required"});
+    const d=parsed.data;
+    const prior=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
+      "select id,provider,merchant_reference,amount_minor,description,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+      [tenantId,idempotencyKey],
+    ));
+    if (prior.rows[0]) {
+      const row=prior.rows[0];
+      if (row.provider!=="paystack" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if (row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,reference:row.provider_payment_reference,idempotentReplay:true});
+      return res.status(202).json({transactionId:row.id,status:row.status,message:"Checkout initialization is being reconciled. Do not create a new payment until status is checked."});
+    }
+    const providerReference=`mp_${randomUUID().replace(/-/g,"")}`;
+    const publicToken=Buffer.from(randomBytes(32)).toString("base64url");
+    const tokenHash=createHash("sha256").update(publicToken).digest("hex");
+    const inserted=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
+      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,provider_payment_reference,public_checkout_token_hash,public_checkout_expires_at) values($1,'paystack',$2,$3,$4,'KES','created',$5,$6,$7,now()+interval '24 hours') on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",
+      [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.description,providerReference,tokenHash],
+    ));
+    const transactionId=inserted.rows[0]?.id as string | undefined;
+    if (!transactionId) return res.status(409).json({error:"idempotency_conflict",message:"A concurrent request used this idempotency key. Retry the same request to retrieve its result."});
+    try {
+      const webBase=(process.env.PUBLIC_WEB_BASE_URL ?? "https://pay.mobiwave.co.ke").replace(/\/$/,"");
+      if (!webBase.startsWith("https://")) throw new Error("PUBLIC_WEB_BASE_URL must use HTTPS");
+      const callbackUrl=`${webBase}/checkout/complete?tenantId=${encodeURIComponent(tenantId)}&token=${encodeURIComponent(publicToken)}`;
+      const provider=await initiatePaystackCheckout({
+        amountMinor:d.amountMinor,email:d.email,reference:providerReference,callbackUrl,
+        metadata:{tenantId,transactionId,merchantReference:d.merchantReference},
+      },credentials);
+      await withUserTransaction(req.merchantDbCapability!,async(client)=>{
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
+        await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'paystack.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({reference:provider.reference})]);
+      });
+      return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.authorizationUrl,reference:provider.reference,message:"Paystack hosted checkout created. Payment remains pending until signed webhook and independent verification."});
+    } catch {
+      await withUserTransaction(req.merchantDbCapability!,(client)=>client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transactionId,tenantId]));
+      return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Paystack checkout outcome is uncertain. Reconcile before retrying with a new idempotency key."});
+    }
+  } catch(error) { return next(error); }
+});
+
 async function persistProviderNotification(
-  provider: "daraja" | "pesapal",
+  provider: "daraja" | "pesapal" | "paystack",
   tenantId: string,
   eventId: string,
   eventType: string,
@@ -148,7 +227,7 @@ async function persistProviderNotification(
   const claimed = await withProviderSystemTransaction(capability, async (client, scope) => {
     const tenant = await client.query("select id from public.payment_tenants where id=$1", [scope.tenantId]);
     if (!tenant.rows[0]) return { kind: "tenant_missing" as const };
-    const correlationColumn = scope.provider === "daraja" ? "provider_checkout_request_id" : "provider_order_tracking_id";
+    const correlationColumn = scope.provider === "daraja" ? "provider_checkout_request_id" : scope.provider === "pesapal" ? "provider_order_tracking_id" : "provider_payment_reference";
     const tx = await client.query(
       `select id,amount_minor,currency,status from public.payment_transactions
        where tenant_id=$1 and provider=$2 and ${correlationColumn}=$3 for update`,
@@ -198,7 +277,7 @@ async function persistProviderNotification(
       (scope.provider !== "daraja" || (typeof verified.receipt === "string" && verified.receipt.length > 0));
 
     if (evidenceMatches && ["pending","unknown"].includes(tx.status)) {
-      const outcome = scope.provider === "pesapal" && verified.code === 2 ? "failed" : "succeeded";
+      const outcome = scope.provider !== "daraja" && verified.code === 2 ? "failed" : "succeeded";
       await client.query(
         "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('pending','unknown')",
         [outcome,scope.provider+"_status_query_verified",verified.receipt ?? null,tx.id,scope.tenantId],
@@ -264,6 +343,57 @@ router.get("/webhooks/pesapal/:tenantId", pesapalIpnLimiter, async (req,res,next
       duplicate:()=>res.status(200).send("Duplicate accepted"),
       unmatched:()=>res.status(200).send("Accepted for transaction correlation"),
       tenantMissing:()=>res.status(404).send("Not found"),
+    });
+  } catch(error) { return next(error); }
+});
+
+
+function validPaystackSignature(rawBody: Buffer, modernHeader: string | undefined, legacyHeader: string | undefined, credentials: PaystackCredentials) {
+  if (modernHeader) {
+    if (!credentials.webhookSecret) return false;
+    const parts=modernHeader.split(",").map((part)=>part.trim());
+    const timestampPart=parts.find((part)=>part.startsWith("t="));
+    const timestamp=timestampPart?.slice(2) ?? "";
+    if (!/^\d{10}$/.test(timestamp) || Math.abs(Math.floor(Date.now()/1000)-Number(timestamp))>300) return false;
+    const signatures=parts.filter((part)=>part.startsWith("v1=")).map((part)=>part.slice(3).split(":").at(-1) ?? "");
+    const expected=createHmac("sha512",credentials.webhookSecret).update(Buffer.concat([Buffer.from(timestamp+"."),rawBody])).digest();
+    return signatures.some((signature)=>{
+      if (!/^[a-f0-9]{128}$/i.test(signature)) return false;
+      const supplied=Buffer.from(signature,"hex");
+      return supplied.length===expected.length && timingSafeEqual(supplied,expected);
+    });
+  }
+  if (!legacyHeader || !/^[a-f0-9]{128}$/i.test(legacyHeader)) return false;
+  const expected=createHmac("sha512",credentials.secretKey).update(rawBody).digest();
+  const supplied=Buffer.from(legacyHeader,"hex");
+  return supplied.length===expected.length && timingSafeEqual(supplied,expected);
+}
+
+router.post("/webhooks/paystack/:tenantId", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  const reference=String((req.body as any)?.data?.reference ?? "");
+  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9.=-]{1,120}$/.test(reference)) return res.status(400).json({error:"invalid_webhook"});
+  const rawBody=(req as typeof req & {rawBody?:Buffer}).rawBody;
+  if (!rawBody?.length) return res.status(400).json({error:"raw_body_required"});
+  try {
+    const capability=issueProviderSystemCapability("paystack",tenantId,reference);
+    const credentials=await getTenantProviderCredentials(tenantId,"paystack",{kind:"provider",capability}) as PaystackCredentials;
+    if (!validPaystackSignature(rawBody,req.header("paystack-signature"),req.header("x-paystack-signature"),credentials)) {
+      return res.status(401).json({error:"invalid_webhook_signature"});
+    }
+    const eventType=String((req.body as any)?.event ?? "unknown").slice(0,120);
+    await persistProviderNotification("paystack",tenantId,reference,eventType,req.body,createHash("sha256").update(rawBody).digest("hex"),async(providerCapability)=>{
+      const providerCredentials=await getTenantProviderCredentials(tenantId,"paystack",{kind:"provider",capability:providerCapability}) as PaystackCredentials;
+      const verified=await verifyPaystackTransaction(reference,providerCredentials);
+      const status=String(verified.status ?? "");
+      const code=status==="success"?1:status==="failed"?2:0;
+      if (code===0) throw new Error("Paystack transaction is not terminal yet");
+      return {code,amountMinor:Number(verified.amount),currency:String(verified.currency ?? ""),receipt:undefined};
+    },{
+      success:()=>res.status(200).json({received:true}),
+      duplicate:()=>res.status(200).json({received:true,duplicate:true}),
+      unmatched:()=>res.status(200).json({received:true,pendingCorrelation:true}),
+      tenantMissing:()=>res.status(404).json({error:"unknown_tenant"}),
     });
   } catch(error) { return next(error); }
 });

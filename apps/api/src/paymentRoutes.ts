@@ -15,7 +15,7 @@ const createTenantSchema = z.object({
   slug: z.string().regex(/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/),
 });
 const createTransactionSchema = z.object({
-  provider: z.enum(["daraja", "pesapal", "bank", "manual"]),
+  provider: z.enum(["daraja", "pesapal", "paystack", "bank", "manual"]),
   merchantReference: z.string().trim().min(1).max(120),
   amountMinor: z.number().int().positive().max(9_000_000_000_000),
   currency: z.string().regex(/^[A-Z]{3}$/).default("KES"),
@@ -23,7 +23,7 @@ const createTransactionSchema = z.object({
   description: z.string().trim().max(500).optional(),
 });
 const statementImportSchema = z.object({
-  provider: z.enum(["daraja","pesapal","bank","manual"]),
+  provider: z.enum(["daraja","pesapal","paystack","bank","manual"]),
   sourceName: z.string().trim().min(1).max(255),
   csvContent: z.string().min(1).max(1_800_000),
 });

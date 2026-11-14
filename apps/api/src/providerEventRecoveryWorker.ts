@@ -1,9 +1,9 @@
-import { queryDarajaStk, queryPesapalStatus } from "./providers.js";
+import { queryDarajaStk, queryPesapalStatus, verifyPaystackTransaction } from "./providers.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { issuePaymentWorkerCapability, newLeaseToken, withPaymentWorkerTransaction } from "./systemDb.js";
 
 type RetryEvent = {
-  id: string; tenant_id: string; provider: "daraja" | "pesapal"; provider_event_id: string;
+  id: string; tenant_id: string; provider: "daraja" | "pesapal" | "paystack"; provider_event_id: string;
   processing_attempts: number; payload: Record<string, any>; transaction_id: string | null; amount_minor: string | number | null;
   currency: string | null; status: string | null; claim_token: string;
 };
@@ -45,7 +45,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
          from public.payment_provider_events e
          left join public.payment_transactions t on t.tenant_id=e.tenant_id and
            ((e.provider='daraja' and t.provider='daraja' and t.provider_checkout_request_id=e.provider_event_id) or
-            (e.provider='pesapal' and t.provider='pesapal' and t.provider_order_tracking_id=e.provider_event_id))
+            (e.provider='pesapal' and t.provider='pesapal' and t.provider_order_tracking_id=e.provider_event_id) or\n            (e.provider='paystack' and t.provider='paystack' and t.provider_payment_reference=e.provider_event_id))
          where e.processing_status in ('retry','received')
            and e.retry_at <= now()
            and (e.lease_expires_at is null or e.lease_expires_at <= now())
@@ -80,7 +80,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
         const status=await queryDarajaStk(event.provider_event_id,credentials as Record<string,string>);
         if (String(status.ResultCode)==="0" && callback?.ResultCode===0 && Number.isFinite(amount) &&
             amount*100===Number(event.amount_minor) && typeof receipt==="string" && receipt.length>0) outcome="succeeded";
-      } else {
+      } else if (event.provider === "pesapal") {
         const credentials=await getTenantProviderCredentials(event.tenant_id,"pesapal",{kind:"worker",capability:workerCapability});
         const status=await queryPesapalStatus(event.provider_event_id,credentials as Record<string,string>);
         const code=Number(status.status_code), amount=Number(status.amount);
@@ -91,6 +91,21 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
         else if (matches && code===2) outcome="failed";
         else if (code===0 && matches) {
           await retryOwnedEvent(event,"Provider payment is not terminal yet");
+          counts.retried++;
+          continue;
+        }
+      } else {
+        const credentials=await getTenantProviderCredentials(event.tenant_id,"paystack",{kind:"worker",capability:workerCapability});
+        const status=await verifyPaystackTransaction(event.provider_event_id,credentials as {secretKey:string;webhookSecret?:string});
+        const code=String(status.status)==="success"?1:String(status.status)==="failed"?2:0;
+        const amount=Number(status.amount);
+        const currency=String(status.currency??"").toUpperCase();
+        const matches=Number.isFinite(amount) && amount===Number(event.amount_minor) &&
+          currency===String(event.currency).trim().toUpperCase();
+        if (matches && code===1) outcome="succeeded";
+        else if (matches && code===2) outcome="failed";
+        else if (matches && code===0) {
+          await retryOwnedEvent(event,"Paystack transaction is not terminal yet");
           counts.retried++;
           continue;
         }

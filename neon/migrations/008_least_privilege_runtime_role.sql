@@ -48,6 +48,11 @@ returns boolean language sql stable as $$
     and coalesce(current_setting('app.provider_system_provider',true),'')=target_provider
 $$;
 
+create or replace function public.is_payment_provider_tenant_context(target_tenant uuid)
+returns boolean language sql stable as $
+  select coalesce(current_setting('app.provider_system_tenant_id',true),'')=target_tenant::text
+$;
+
 create or replace function public.is_payment_provider_event_scope(target_tenant uuid, target_provider text, target_event text)
 returns boolean language sql stable as $$
   select public.is_payment_provider_tenant_scope(target_tenant,target_provider)
@@ -72,6 +77,7 @@ $$;
 grant execute on function public.current_payment_tenant_role(uuid) to mobipay_runtime;
 grant execute on function public.is_payment_provider_tenant_scope(uuid,text) to mobipay_runtime;
 grant execute on function public.is_payment_provider_event_scope(uuid,text,text) to mobipay_runtime;
+grant execute on function public.is_payment_provider_tenant_context(uuid) to mobipay_runtime;
 grant execute on function public.is_payment_worker_context() to mobipay_runtime;
 grant execute on function public.is_payment_platform_admin_context() to mobipay_runtime;
 grant execute on function public.is_payment_tenant_bootstrap_context() to mobipay_runtime;
@@ -210,7 +216,7 @@ drop policy if exists payment_audit_insert on public.payment_audit_events;
 create policy payment_audit_insert on public.payment_audit_events
   for insert with check (
     public.current_payment_tenant_role(tenant_id) in ('owner','admin','finance')
-    or public.is_payment_provider_tenant_scope(tenant_id,provider)
+    or public.is_payment_provider_tenant_context(tenant_id)
     or public.is_payment_worker_context()
     or public.is_payment_platform_admin_context()
   );

@@ -44,11 +44,5 @@
     "api/worker.ts": {
       "maxDuration": 60
     }
-  },
-  "crons": [
-    {
-      "path": "/api/worker",
-      "schedule": "*/5 * * * *"
-    }
-  ]
+  }
 }

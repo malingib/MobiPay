@@ -2,7 +2,9 @@
 -- Apply after migration 006_worker_lease_ownership.sql.
 
 alter table public.payment_transactions
-  add column if not exists provider_payment_reference text;
+  add column if not exists provider_payment_reference text,
+  add column if not exists public_checkout_token_hash text,
+  add column if not exists public_checkout_expires_at timestamptz;
 
 create unique index if not exists payment_transactions_paystack_reference_idx
   on public.payment_transactions(tenant_id, provider_payment_reference)
@@ -55,3 +57,8 @@ alter table public.payment_reconciliation_records
 create index if not exists payment_transactions_paystack_pending_idx
   on public.payment_transactions(tenant_id, updated_at)
   where provider = 'paystack' and status in ('created','pending','unknown');
+
+
+create index if not exists payment_transactions_public_checkout_token_idx
+  on public.payment_transactions(tenant_id, public_checkout_token_hash)
+  where public_checkout_token_hash is not null;

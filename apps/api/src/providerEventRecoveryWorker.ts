@@ -196,12 +196,14 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
             "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_mismatch',provider_verification_last_error='Provider amount or currency did not match the transaction.',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
             [transaction.id,transaction.tenant_id,leaseToken],
           );
-          if(updated.rowCount)await client.query(
-            "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'paystack',$3,'amount_mismatch',$4::jsonb)",
-            [transaction.tenant_id,transaction.id,transaction.provider_payment_reference,JSON.stringify({reason:"Paystack verification amount or currency did not match the stored checkout."})],
-          );
+          if(updated.rowCount){
+            await client.query(
+              "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'paystack',$3,'amount_mismatch',$4::jsonb)",
+              [transaction.tenant_id,transaction.id,transaction.provider_payment_reference,JSON.stringify({reason:"Paystack verification amount or currency did not match the stored checkout."})],
+            );
+            counts.exceptions++;
+          }
         });
-        if(updated.rowCount)counts.exceptions++;
         continue;
       }
       if(status==="pending"){
@@ -236,7 +238,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
           );
           if(updated.rowCount)counts.exceptions++;
         }else{
-          await client.query(
+          const updated=await client.query(
             "update public.payment_transactions set provider_status='verification_retry',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
             [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
           );

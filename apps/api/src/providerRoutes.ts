@@ -342,7 +342,7 @@ router.get("/webhooks/pesapal/:tenantId", pesapalIpnLimiter, async (req,res,next
 });
 
 
-function validPaystackSignature(rawBody: Buffer, modernHeader: string | undefined, legacyHeader: string | undefined, credentials: PaystackCredentials) {
+export function validPaystackSignature(rawBody: Buffer, modernHeader: string | undefined, legacyHeader: string | undefined, credentials: PaystackCredentials) {
   if (modernHeader) {
     if (!credentials.webhookSecret) return false;
     const parts=modernHeader.split(",").map((part)=>part.trim());

@@ -177,7 +177,7 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
       if (row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,reference:row.provider_payment_reference,idempotentReplay:true});
       return res.status(202).json({transactionId:row.id,status:row.status,message:"Checkout initialization is being reconciled. Do not create a new payment until status is checked."});
     }
-    const providerReference=`mp_${randomUUID().replace(/-/g,"")}`;
+    const providerReference=`mp-${randomUUID().replace(/-/g,"")}`;
     const publicToken=Buffer.from(randomBytes(32)).toString("base64url");
     const tokenHash=createHash("sha256").update(publicToken).digest("hex");
     const inserted=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
@@ -242,6 +242,16 @@ async function persistProviderNotification(
   if (claimed.kind === "tenant_missing") { response.tenantMissing(); return; }
   if (claimed.kind === "duplicate") { response.duplicate(); return; }
   if (claimed.kind === "unmatched") { response.unmatched(); return; }
+
+  if (provider === "paystack") {
+    const released=await withProviderSystemTransaction(capability,async(client,scope)=>client.query(
+      "update public.payment_provider_events set processing_status='retry',retry_at=now(),processing_started_at=null,claim_token=null,lease_expires_at=null,last_error=null where id=$1 and tenant_id=$2 and provider=$3 and provider_event_id=$4 and claim_token=$5 returning id",
+      [claimed.eventDbId,scope.tenantId,scope.provider,scope.eventId,claimToken],
+    ));
+    if (!released.rowCount) throw new Error("Paystack webhook lease was lost before queueing verification");
+    response.success("Accepted for asynchronous provider verification");
+    return;
+  }
 
   let verified: { code: number; amountMinor?: number; currency?: string; receipt?: string };
   try {
@@ -366,7 +376,7 @@ export function validPaystackSignature(rawBody: Buffer, modernHeader: string | u
 router.post("/webhooks/paystack/:tenantId", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? "");
   const reference=String((req.body as any)?.data?.reference ?? "");
-  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9_.=-]{1,120}$/.test(reference)) return res.status(400).json({error:"invalid_webhook"});
+  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9.=-]{1,120}$/.test(reference)) return res.status(400).json({error:"invalid_webhook"});
   const rawBody=(req as typeof req & {rawBody?:Buffer}).rawBody;
   if (!rawBody?.length) return res.status(400).json({error:"raw_body_required"});
   try {

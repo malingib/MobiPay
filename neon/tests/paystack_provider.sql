@@ -28,5 +28,13 @@ begin
     select 1 from pg_indexes
     where schemaname='public' and indexname='payment_transactions_paystack_reference_idx'
   ) then raise exception 'Paystack reference uniqueness index is missing'; end if;
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='payment_transactions' and column_name='provider_verification_attempts'
+  ) then raise exception 'Paystack verification attempt counter is missing'; end if;
+  if not exists (
+    select 1 from pg_indexes
+    where schemaname='public' and indexname='payment_transactions_paystack_verification_queue_idx'
+  ) then raise exception 'Paystack recovery queue index is missing'; end if;
 end;
 $$;

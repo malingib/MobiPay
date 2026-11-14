@@ -216,7 +216,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
       if(outcome){
         const result=await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
           "update public.payment_transactions set status=$1,provider_status=$2,provider_transaction_id=$3,confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$4 and tenant_id=$5 and provider_verification_lease_token=$6 and status in ('pending','unknown') returning id",
-          [outcome,status,String(verified.id??""),transaction.id,transaction.tenant_id,leaseToken],
+          [outcome,status,verified.id==null?null:String(verified.id),transaction.id,transaction.tenant_id,leaseToken],
         ));
         if(result.rowCount)counts.settled++;
         continue;

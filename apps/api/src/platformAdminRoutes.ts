@@ -33,6 +33,21 @@ router.get("/security/database-role", async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+router.get("/audit-logs", async (req, res, next) => {
+  try {
+    const requested=Number(req.query.limit ?? 100);
+    const limit=Number.isFinite(requested)?Math.max(1,Math.min(200,Math.trunc(requested))):100;
+    const auditLogs=await withPlatformAdminTransaction(req.platformAdminCapability!,async(client)=>{
+      const result=await client.query(
+        "select id,actor_username,action,entity_type,entity_id,metadata,created_at from public.platform_admin_audit_logs order by created_at desc limit $1",
+        [limit],
+      );
+      return result.rows;
+    });
+    return res.json({auditLogs});
+  } catch(error) { return next(error); }
+});
+
 router.get("/overview", async (req, res, next) => {
   try {
     const data = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {

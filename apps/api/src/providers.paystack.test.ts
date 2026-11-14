@@ -22,15 +22,15 @@ test("Paystack hosted checkout sends KES minor units and only supported checkout
   let requestBody:Record<string,unknown>|undefined;
   globalThis.fetch=(async(_input,init)=>{
     requestBody=JSON.parse(String(init?.body));
-    return new Response(JSON.stringify({status:true,data:{authorization_url:"https://checkout.paystack.com/example",access_code:"access",reference:"mp_test123"}}),{status:200});
+    return new Response(JSON.stringify({status:true,data:{authorization_url:"https://checkout.paystack.com/example",access_code:"access",reference:"mp-test123"}}),{status:200});
   }) as typeof fetch;
   try {
-    const result=await initiatePaystackCheckout({amountMinor:12550,email:"customer@example.com",reference:"mp_test123",callbackUrl:"https://pay.mobiwave.co.ke/checkout/complete",metadata:{tenantId:"tenant"}},credentials);
+    const result=await initiatePaystackCheckout({amountMinor:12550,email:"customer@example.com",reference:"mp-test123",callbackUrl:"https://pay.mobiwave.co.ke/checkout/complete",metadata:{tenantId:"tenant"}},credentials);
     assert.equal(result.authorizationUrl,"https://checkout.paystack.com/example");
     assert.equal(requestBody?.amount,"12550");
     assert.equal(requestBody?.currency,"KES");
     assert.deepEqual(requestBody?.channels,["card","mobile_money"]);
-    assert.equal(requestBody?.reference,"mp_test123");
+    assert.equal(requestBody?.reference,"mp-test123");
   } finally { globalThis.fetch=originalFetch; }
 });
 
@@ -39,11 +39,11 @@ test("Paystack transaction verification encodes the reference and authenticates 
   globalThis.fetch=(async(input,init)=>{
     requested=String(input);
     assert.equal(new Headers(init?.headers).get("authorization"),`Bearer ${credentials.secretKey}`);
-    return new Response(JSON.stringify({status:true,data:{status:"success",amount:12550,currency:"KES",reference:"mp_test123"}}),{status:200});
+    return new Response(JSON.stringify({status:true,data:{status:"success",amount:12550,currency:"KES",reference:"mp-test123"}}),{status:200});
   }) as typeof fetch;
   try {
-    const result=await verifyPaystackTransaction("mp_test123",credentials);
+    const result=await verifyPaystackTransaction("mp-test123",credentials);
     assert.equal(result.status,"success");
-    assert.equal(requested,"https://api.paystack.co/transaction/verify/mp_test123");
+    assert.equal(requested,"https://api.paystack.co/transaction/verify/mp-test123");
   } finally { globalThis.fetch=originalFetch; }
 });

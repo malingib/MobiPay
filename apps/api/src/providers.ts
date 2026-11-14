@@ -177,7 +177,7 @@ export async function initiatePaystackCheckout(input: {
 }
 
 export async function verifyPaystackTransaction(reference: string, credentials: PaystackCredentials) {
-  if (!/^[A-Za-z0-9_.=-]{1,120}$/.test(reference)) throw new Error("Invalid Paystack reference");
+  if (!/^[A-Za-z0-9.=-]{1,120}$/.test(reference)) throw new Error("Invalid Paystack reference");
   const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
     headers: {
       authorization: `Bearer ${required("PAYSTACK_SECRET_KEY", credentials)}`,

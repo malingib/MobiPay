@@ -30,6 +30,7 @@ test("withUserTransaction sets verified identity transaction-locally on the chec
   assert.equal(result, "ok");
   assert.deepEqual(f.calls, [
     { sql: "BEGIN", values: undefined },
+    { sql: "SET LOCAL ROLE mobipay_runtime", values: undefined },
     { sql: "SELECT set_config('app.user_id', $1, true)", values: ["auth0|verified-user"] },
     { sql: "select 42", values: undefined },
     { sql: "COMMIT", values: undefined },
@@ -47,6 +48,7 @@ test("withUserTransaction rolls back on operation failure and always releases th
   );
   assert.deepEqual(f.calls.map((call) => call.sql), [
     "BEGIN",
+    "SET LOCAL ROLE mobipay_runtime",
     "SELECT set_config('app.user_id', $1, true)",
     "ROLLBACK",
   ]);

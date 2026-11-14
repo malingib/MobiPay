@@ -119,7 +119,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
         if (!current.rows[0]) throw new Error("Correlated transaction no longer exists");
         if (outcome && ["pending","unknown"].includes(current.rows[0].status)) {
           await client.query(
-            "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now() where id=$4 and tenant_id=$5 and status in ('pending','unknown')",
+            "update public.payment_transactions set status=$1,provider_status=$2,provider_receipt=coalesce($3,provider_receipt),confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,provider_verification_next_at=case when $1 in ('succeeded','failed') then 'infinity'::timestamptz else provider_verification_next_at end,provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$4 and tenant_id=$5 and status in ('pending','unknown')",
             [outcome,event.provider+"_status_verified_recovery",receipt??null,event.transaction_id,event.tenant_id],
           );
           await client.query(
@@ -128,7 +128,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
           );
         } else if (!outcome || !["created","pending","unknown"].includes(current.rows[0].status)) {
           await client.query(
-            "update public.payment_transactions set status='unknown',provider_status=$1,updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending')",
+            "update public.payment_transactions set status='unknown',provider_status=$1,provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$2 and tenant_id=$3 and status in ('created','pending')",
             [event.provider+"_recovery_requires_review",event.transaction_id,event.tenant_id],
           );
           await client.query(
@@ -193,7 +193,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
       if(!matches){
         await withPaymentWorkerTransaction(workerCapability,async(client)=>{
           const updated=await client.query(
-            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_mismatch',provider_verification_last_error='Provider amount or currency did not match the transaction.',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 returning id",
+            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_mismatch',provider_verification_last_error='Provider amount or currency did not match the transaction.',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
             [transaction.id,transaction.tenant_id,leaseToken],
           );
           if(updated.rowCount)await client.query(
@@ -201,15 +201,15 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
             [transaction.tenant_id,transaction.id,transaction.provider_payment_reference,JSON.stringify({reason:"Paystack verification amount or currency did not match the stored checkout."})],
           );
         });
-        counts.exceptions++;
+        if(updated.rowCount)counts.exceptions++;
         continue;
       }
       if(status==="pending"){
         await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
-          "update public.payment_transactions set provider_status='pending',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3",
+          "update public.payment_transactions set provider_status='pending',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
           [transaction.id,transaction.tenant_id,leaseToken],
         ));
-        counts.retried++;
+        if(updated.rowCount)counts.retried++;
         continue;
       }
       const outcome=status==="success"?"succeeded":status==="failed"||status==="abandoned"?"failed":undefined;
@@ -240,7 +240,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
             "update public.payment_transactions set provider_status='verification_retry',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3",
             [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
           );
-          counts.retried++;
+          if(updated.rowCount)counts.retried++;
         }
       });
     }

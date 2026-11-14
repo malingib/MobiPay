@@ -187,6 +187,7 @@ router.post("/tenants", async (req, res, next) => {
   const userId = req.authUser!.id;
   try {
     const tenant = await withUserTransaction(req.merchantDbCapability!, async (client) => {
+      await client.query("SELECT set_config('app.tenant_bootstrap', $1, true)", ["true"]);
       const created = await client.query("insert into public.payment_tenants(name,slug) values($1,$2) returning id,name,slug,status,created_at", [parsed.data.name, parsed.data.slug]);
       const row = created.rows[0];
       await client.query("insert into public.payment_tenant_memberships(tenant_id,user_id,role,status) values($1,$2,$3,$4)", [row.id, userId, "owner", "active"]);

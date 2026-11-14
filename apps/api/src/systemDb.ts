@@ -83,9 +83,12 @@ export function newLeaseToken(): string {
 export async function readPublicCheckout(tenantId: string, token: string) {
   if (!/^[A-Za-z0-9_-]{40,64}$/.test(token)) return undefined;
   const tokenHash=createHash("sha256").update(token).digest("hex");
-  const result=await inTransaction((client)=>client.query(
-    "select id,provider,merchant_reference,amount_minor,currency,status,provider_receipt,confirmed_at,created_at from public.payment_transactions where tenant_id=$1 and public_checkout_token_hash=$2 and public_checkout_expires_at>now()",
-    [tenantId,tokenHash],
-  ));
+  const result=await inTransaction(async(client)=>{
+    await client.query("select set_config('app.public_checkout_token_hash',$1,true)",[tokenHash]);
+    return client.query(
+      "select id,provider,merchant_reference,amount_minor,currency,status,provider_receipt,confirmed_at,created_at from public.payment_transactions where tenant_id=$1 and public_checkout_token_hash=$2 and public_checkout_expires_at>now()",
+      [tenantId,tokenHash],
+    );
+  });
   return result.rows[0] as {id:string;provider:string;merchant_reference:string;amount_minor:string|number;currency:string;status:string;provider_receipt:string|null;confirmed_at:string|null;created_at:string}|undefined;
 }

@@ -152,3 +152,98 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
   }
   return counts;
 }
+
+
+/** Poll Paystack transactions independently of webhooks so a lost callback cannot strand a payment. */
+export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ checked:number; settled:number; retried:number; exceptions:number }> {
+  const counts={checked:0,settled:0,retried:0,exceptions:0};
+  const workerCapability=issuePaymentWorkerCapability();
+  for(let i=0;i<Math.max(1,Math.min(10,batchSize));i++){
+    const leaseToken=newLeaseToken();
+    const transaction=await withPaymentWorkerTransaction(workerCapability,async(client)=>{
+      const selected=await client.query(
+        `select id,tenant_id,provider_payment_reference,amount_minor,currency,status,provider_verification_attempts
+         from public.payment_transactions
+         where provider='paystack'
+           and status in ('pending','unknown')
+           and provider_status in ('checkout_created','checkout_result_unknown','pending','verification_retry')
+           and provider_verification_next_at<=now()
+           and (provider_verification_lease_expires_at is null or provider_verification_lease_expires_at<=now())
+         order by provider_verification_next_at,created_at
+         limit 1 for update skip locked`,
+      );
+      const row=selected.rows[0];
+      if(!row)return undefined;
+      await client.query(
+        "update public.payment_transactions set provider_verification_attempts=provider_verification_attempts+1,provider_verification_lease_token=$2,provider_verification_lease_expires_at=now()+interval '45 seconds' where id=$1",
+        [row.id,leaseToken],
+      );
+      return {...row,provider_verification_attempts:Number(row.provider_verification_attempts)+1,claim_token:leaseToken};
+    });
+    if(!transaction)break;
+    counts.checked++;
+    const attempts=Number(transaction.provider_verification_attempts);
+    try{
+      const credentials=await getTenantProviderCredentials(transaction.tenant_id,"paystack",{kind:"worker",capability:workerCapability});
+      const verified=await verifyPaystackTransaction(String(transaction.provider_payment_reference),credentials as {secretKey:string;webhookSecret?:string});
+      const status=String(verified.status??"");
+      const amount=Number(verified.amount);
+      const currency=String(verified.currency??"").toUpperCase();
+      const matches=Number.isFinite(amount)&&amount===Number(transaction.amount_minor)&&currency===String(transaction.currency).toUpperCase();
+      if(!matches){
+        await withPaymentWorkerTransaction(workerCapability,async(client)=>{
+          const updated=await client.query(
+            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_mismatch',provider_verification_last_error='Provider amount or currency did not match the transaction.',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 returning id",
+            [transaction.id,transaction.tenant_id,leaseToken],
+          );
+          if(updated.rowCount)await client.query(
+            "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'paystack',$3,'amount_mismatch',$4::jsonb)",
+            [transaction.tenant_id,transaction.id,transaction.provider_payment_reference,JSON.stringify({reason:"Paystack verification amount or currency did not match the stored checkout."})],
+          );
+        });
+        counts.exceptions++;
+        continue;
+      }
+      if(status==="pending"){
+        await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
+          "update public.payment_transactions set provider_status='pending',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3",
+          [transaction.id,transaction.tenant_id,leaseToken],
+        ));
+        counts.retried++;
+        continue;
+      }
+      const outcome=status==="success"?"succeeded":status==="failed"||status==="abandoned"?"failed":undefined;
+      if(outcome){
+        const result=await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
+          "update public.payment_transactions set status=$1,provider_status=$2,provider_transaction_id=$3,confirmed_at=case when $1='succeeded' then coalesce(confirmed_at,now()) else confirmed_at end,provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$4 and tenant_id=$5 and provider_verification_lease_token=$6 and status in ('pending','unknown') returning id",
+          [outcome,status,String(verified.id??""),transaction.id,transaction.tenant_id,leaseToken],
+        ));
+        if(result.rowCount)counts.settled++;
+        continue;
+      }
+      throw new Error("Paystack returned a non-terminal transaction status");
+    }catch(error){
+      const message=error instanceof Error?error.message:"Paystack verification failed";
+      await withPaymentWorkerTransaction(workerCapability,async(client)=>{
+        if(attempts>=10){
+          const updated=await client.query(
+            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_exhausted',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 returning id",
+            [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
+          );
+          if(updated.rowCount)await client.query(
+            "insert into public.payment_reconciliation_exceptions(tenant_id,transaction_id,provider,provider_reference,exception_type,details) values($1,$2,'paystack',$3,'provider_mismatch',$4::jsonb)",
+            [transaction.tenant_id,transaction.id,transaction.provider_payment_reference,JSON.stringify({reason:"Paystack checkout verification exhausted its retry budget.",lastError:message.slice(0,500)})],
+          );
+          if(updated.rowCount)counts.exceptions++;
+        }else{
+          await client.query(
+            "update public.payment_transactions set provider_status='verification_retry',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3",
+            [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
+          );
+          counts.retried++;
+        }
+      });
+    }
+  }
+  return counts;
+}

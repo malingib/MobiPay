@@ -6,7 +6,7 @@ import { validPaystackSignature } from "./providerRoutes.js";
 const credentials={secretKey:"sk_test_123456789012345678901234567890",webhookSecret:"whsec_123456789012345678901234567890"};
 
 test("Paystack modern webhook signature validates the timestamp and raw request bytes",()=>{
-  const raw=Buffer.from('{"event":"charge.success","data":{"reference":"mp_test123","amount":1000}}');
+  const raw=Buffer.from('{"event":"charge.success","data":{"reference":"mp-test123","amount":1000}}');
   const timestamp=String(Math.floor(Date.now()/1000));
   const signature=createHmac("sha512",credentials.webhookSecret).update(Buffer.concat([Buffer.from(timestamp+"."),raw])).digest("hex");
   assert.equal(validPaystackSignature(raw,`t=${timestamp},v1=whk_test:${signature}`,undefined,credentials),true);

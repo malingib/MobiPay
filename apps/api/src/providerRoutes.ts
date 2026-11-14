@@ -181,7 +181,7 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
     const publicToken=Buffer.from(randomBytes(32)).toString("base64url");
     const tokenHash=createHash("sha256").update(publicToken).digest("hex");
     const inserted=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
-      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,provider_payment_reference,public_checkout_token_hash,public_checkout_expires_at) values($1,'paystack',$2,$3,$4,'KES','created',$5,$6,$7,now()+interval '24 hours') on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",
+      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,provider_payment_reference,public_checkout_token_hash,public_checkout_expires_at) values($1,'paystack',$2,$3,$4,'KES','pending',$5,$6,$7,now()+interval '24 hours') on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",
       [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.description,providerReference,tokenHash],
     ));
     const transactionId=inserted.rows[0]?.id as string | undefined;
@@ -195,12 +195,12 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
         metadata:{tenantId,transactionId,merchantReference:d.merchantReference},
       },credentials);
       await withUserTransaction(req.merchantDbCapability!,async(client)=>{
-        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status='pending',provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status=case when status in ('created','unknown') then 'pending' else status end,provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
         await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'paystack.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({reference:provider.reference})]);
       });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.authorizationUrl,reference:provider.reference,message:"Paystack hosted checkout created. Payment remains pending until signed webhook and independent verification."});
     } catch {
-      await withUserTransaction(req.merchantDbCapability!,(client)=>client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1 and tenant_id=$2",[transactionId,tenantId]));
+      await withUserTransaction(req.merchantDbCapability!,(client)=>client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1 and tenant_id=$2 and status in ('created','pending')",[transactionId,tenantId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Paystack checkout outcome is uncertain. Reconcile before retrying with a new idempotency key."});
     }
   } catch(error) { return next(error); }

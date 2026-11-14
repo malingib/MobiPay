@@ -12,7 +12,7 @@ export default {
           "user-agent": "MobiPay-Worker-Scheduler/1.0"
         },
         body: JSON.stringify({ cron: controller.cron, scheduledTime: controller.scheduledTime }),
-        signal: AbortSignal.timeout(25_000)
+        signal: AbortSignal.timeout(55_000)
       });
       if (!response.ok) {
         const body = await response.text().catch(() => "");

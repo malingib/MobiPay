@@ -135,7 +135,7 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
       });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.redirectUrl});
     } catch {
-      await withUserTransaction(req.merchantDbCapability!, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',updated_at=now() where id=$1",[transactionId]));
+      await withUserTransaction(req.merchantDbCapability!, (client) => client.query("update public.payment_transactions set status='unknown',provider_status='checkout_result_unknown',provider_verification_next_at=now(),updated_at=now() where id=$1",[transactionId]));
       return res.status(502).json({error:"provider_result_unknown",transactionId,message:"Checkout outcome is uncertain; query provider status before retrying."});
     }
   } catch(error) { return next(error); }
@@ -195,7 +195,7 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
         metadata:{tenantId,transactionId,merchantReference:d.merchantReference},
       },credentials);
       await withUserTransaction(req.merchantDbCapability!,async(client)=>{
-        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status=case when status in ('created','unknown') then 'pending' else status end,provider_status='checkout_created',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
+        await client.query("update public.payment_transactions set provider_transaction_id=$1,provider_checkout_url=$2,status=case when status in ('created','unknown') then 'pending' else status end,provider_status='checkout_created',provider_verification_next_at=now()+interval '60 seconds',updated_at=now() where id=$3 and tenant_id=$4 and provider='paystack'",[provider.reference,provider.authorizationUrl,transactionId,tenantId]);
         await client.query("insert into public.payment_audit_events(tenant_id,actor_user_id,action,entity_type,entity_id,metadata) values($1,$2,'paystack.checkout.created','transaction',$3,$4::jsonb)",[tenantId,req.authUser!.id,transactionId,JSON.stringify({reference:provider.reference})]);
       });
       return res.status(201).json({transactionId,status:"pending",redirectUrl:provider.authorizationUrl,reference:provider.reference,message:"Paystack hosted checkout created. Payment remains pending until signed webhook and independent verification."});

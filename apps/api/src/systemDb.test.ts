@@ -31,7 +31,7 @@ test("provider capability is opaque and bound to one provider correlation", asyn
     assert.equal(scope.tenantId, "tenant-a");
     assert.equal(scope.eventId, "checkout-1");
   }, f.pool);
-  assert.deepEqual(f.calls, ["BEGIN", "COMMIT"]);
+  assert.deepEqual(f.calls, ["BEGIN", "SET LOCAL ROLE mobipay_runtime", "SELECT set_config('app.provider_system_tenant_id', $1, true)", "SELECT set_config('app.provider_system_provider', $1, true)", "SELECT set_config('app.provider_system_event_id', $1, true)", "COMMIT"]);
   assert.equal(f.released, 1);
 });
 
@@ -49,7 +49,7 @@ test("worker transaction rolls back and releases on failure", async () => {
     withPaymentWorkerTransaction(issuePaymentWorkerCapability(), async () => { throw new Error("worker failed"); }, f.pool),
     /worker failed/,
   );
-  assert.deepEqual(f.calls, ["BEGIN", "ROLLBACK"]);
+  assert.deepEqual(f.calls, ["BEGIN", "SET LOCAL ROLE mobipay_runtime", "SELECT set_config('app.payment_worker', $1, true)", "ROLLBACK"]);
   assert.equal(f.released, 1);
 });
 

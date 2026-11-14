@@ -69,6 +69,12 @@ jobs:
         run: npm audit --audit-level=critical
       - name: API and web typechecks
         run: npm run typecheck
+      - name: Reject escaped admin template interpolation
+        run: |
+          if grep -nF '\${' apps/web/src/admin.tsx; then
+            echo "Unexpected escaped template interpolation in platform admin UI"
+            exit 1
+          fi
       - name: API tests
         run: npm test
       - name: API and web production builds

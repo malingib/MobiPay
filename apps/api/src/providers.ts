@@ -4,6 +4,7 @@ function required(name: string, credentials?: Record<string, string>) {
   const credentialFields: Record<string, string> = {
     DARAJA_CONSUMER_KEY: "consumerKey", DARAJA_CONSUMER_SECRET: "consumerSecret", DARAJA_SHORTCODE: "shortCode", DARAJA_PASSKEY: "passkey",
     PESAPAL_CONSUMER_KEY: "consumerKey", PESAPAL_CONSUMER_SECRET: "consumerSecret", PESAPAL_IPN_ID: "ipnId",
+    PAYSTACK_SECRET_KEY: "secretKey",
   };
   const credentialField = credentialFields[name];
   const value = credentialField ? credentials?.[credentialField] : process.env[name];
@@ -117,4 +118,76 @@ export async function queryPesapalStatus(orderTrackingId: string, credentials?: 
 
 export function sha256Payload(payload: unknown) {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+
+export type PaystackCredentials = { secretKey: string; webhookSecret?: string };
+
+export async function verifyPaystackCredentials(credentials: PaystackCredentials) {
+  if (!credentials.secretKey || !/^sk_test_[A-Za-z0-9]+$/.test(credentials.secretKey)) {
+    throw new Error("Paystack sandbox secret key is invalid");
+  }
+  const response = await fetch("https://api.paystack.co/balance", {
+    headers: { authorization: `Bearer ${credentials.secretKey}`, accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await responseJson(response);
+  if (body.status !== true || !Array.isArray(body.data)) throw new Error("Paystack credentials could not be verified");
+  return true;
+}
+
+export async function initiatePaystackCheckout(input: {
+  amountMinor: number;
+  email: string;
+  reference: string;
+  callbackUrl: string;
+  metadata: Record<string, string>;
+}, credentials: PaystackCredentials) {
+  if ((process.env.PAYSTACK_ENV ?? "sandbox") !== "sandbox") {
+    throw new Error("Live Paystack initiation is disabled pending production readiness approval");
+  }
+  const response = await fetch("https://api.paystack.co/transaction/initialize", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${required("PAYSTACK_SECRET_KEY", credentials)}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      amount: String(input.amountMinor),
+      currency: "KES",
+      email: input.email,
+      reference: input.reference,
+      callback_url: input.callbackUrl,
+      channels: ["card", "mobile_money"],
+      metadata: input.metadata,
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await responseJson(response);
+  const data = body.data as Record<string, unknown> | undefined;
+  if (body.status !== true || typeof data?.authorization_url !== "string" || typeof data.reference !== "string") {
+    throw new Error("Paystack did not return a hosted checkout URL");
+  }
+  return {
+    authorizationUrl: data.authorization_url,
+    accessCode: typeof data.access_code === "string" ? data.access_code : undefined,
+    reference: data.reference,
+  };
+}
+
+export async function verifyPaystackTransaction(reference: string, credentials: PaystackCredentials) {
+  if (!/^[A-Za-z0-9.=-]{1,120}$/.test(reference)) throw new Error("Invalid Paystack reference");
+  const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+    headers: {
+      authorization: `Bearer ${required("PAYSTACK_SECRET_KEY", credentials)}`,
+      accept: "application/json",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await responseJson(response);
+  if (body.status !== true || !body.data || typeof body.data !== "object") {
+    throw new Error("Paystack transaction verification failed");
+  }
+  return body.data as Record<string, unknown>;
 }

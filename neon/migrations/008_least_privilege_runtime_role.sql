@@ -49,9 +49,9 @@ returns boolean language sql stable as $$
 $$;
 
 create or replace function public.is_payment_provider_tenant_context(target_tenant uuid)
-returns boolean language sql stable as $
+returns boolean language sql stable as $func$
   select coalesce(current_setting('app.provider_system_tenant_id',true),'')=target_tenant::text
-$;
+$func$;
 
 create or replace function public.is_payment_provider_event_scope(target_tenant uuid, target_provider text, target_event text)
 returns boolean language sql stable as $$

@@ -227,7 +227,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
       await withPaymentWorkerTransaction(workerCapability,async(client)=>{
         if(attempts>=10){
           const updated=await client.query(
-            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_exhausted',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 returning id",
+            "update public.payment_transactions set status=case when status='pending' then 'unknown' else status end,provider_status='verification_exhausted',provider_verification_next_at='infinity',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
             [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
           );
           if(updated.rowCount)await client.query(
@@ -237,7 +237,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
           if(updated.rowCount)counts.exceptions++;
         }else{
           await client.query(
-            "update public.payment_transactions set provider_status='verification_retry',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3",
+            "update public.payment_transactions set provider_status='verification_retry',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=$4,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
             [transaction.id,transaction.tenant_id,leaseToken,message.slice(0,800)],
           );
           if(updated.rowCount)counts.retried++;

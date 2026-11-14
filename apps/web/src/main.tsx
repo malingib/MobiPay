@@ -256,4 +256,65 @@ function TransactionTable({ items }: { items: Tx[] }) {
   if (!items.length) return <Empty>No transactions yet. Initiate a sandbox checkout to create a real database record.</Empty>;
   return <div className="table-wrap"><table><thead><tr><th>REFERENCE</th><th>PROVIDER</th><th>AMOUNT</th><th>STATUS</th><th>PROVIDER RECEIPT</th><th>CREATED</th></tr></thead><tbody>{items.map((t) => <tr key={t.id}><td><strong>{t.merchant_reference}</strong><small className="table-sub">{t.payer_reference || t.id}</small></td><td>{label(t.provider)}</td><td className="amount">{cash(Number(t.amount_minor), t.currency || "KES")}</td><td><Status value={t.status}/></td><td>{t.provider_receipt || "—"}</td><td>{stamp(t.created_at)}</td></tr>)}</tbody></table></div>;
 }
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{window.location.pathname.startsWith("/admin") ? <AdminApp /> : <App />}</React.StrictMode>);
+function CheckoutReturn() {
+  const params=new URLSearchParams(window.location.search);
+  const tenantId=params.get("tenantId") ?? "";
+  const token=params.get("token") ?? "";
+  const [transaction,setTransaction]=useState<{id:string;provider:string;reference:string;amountMinor:number;currency:string;status:string;receipt?:string|null;confirmedAt?:string|null}|null>(null);
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(true);
+  const [lastChecked,setLastChecked]=useState("");
+  useEffect(()=>{
+    let active=true;
+    let timer:number|undefined;
+    const load=async()=>{
+      if(!tenantId || !token){setError("This checkout return link is incomplete.");setLoading(false);return;}
+      try{
+        const response=await fetch(`${apiBase}/api/v1/public/checkout/${encodeURIComponent(tenantId)}/${encodeURIComponent(token)}`,{headers:{accept:"application/json"},cache:"no-store"});
+        const body=await response.json().catch(()=>({}));
+        if(!response.ok)throw new Error(body.message || "Checkout status could not be retrieved.");
+        if(!active)return;
+        setTransaction(body.transaction);
+        setError("");
+        setLastChecked(new Date().toLocaleTimeString("en-KE"));
+        if(!["succeeded","failed","cancelled","expired"].includes(body.transaction?.status))timer=window.setTimeout(load,5000);
+      }catch(e){
+        if(!active)return;
+        setError(e instanceof Error?e.message:"Unable to retrieve payment status.");
+      }finally{if(active)setLoading(false);}
+    };
+    void load();
+    return ()=>{active=false;if(timer)window.clearTimeout(timer);};
+  },[tenantId,token]);
+  async function refresh(){
+    setLoading(true);setError("");
+    try{
+      const response=await fetch(`${apiBase}/api/v1/public/checkout/${encodeURIComponent(tenantId)}/${encodeURIComponent(token)}`,{headers:{accept:"application/json"},cache:"no-store"});
+      const body=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(body.message || "Checkout status could not be retrieved.");
+      setTransaction(body.transaction);setLastChecked(new Date().toLocaleTimeString("en-KE"));
+    }catch(e){setError(e instanceof Error?e.message:"Unable to retrieve payment status.");}
+    finally{setLoading(false);}
+  }
+  const succeeded=transaction?.status==="succeeded";
+  const failed=transaction && ["failed","cancelled","expired"].includes(transaction.status);
+  return <main className="checkout-return-shell"><section className="checkout-return-card">
+    <div className="brand-row"><div className="brand-mark">MW</div><div className="brand-name">MobiWave<span>Secure payments</span></div></div>
+    <p className="eyebrow">PAYMENT STATUS</p>
+    <h1>{succeeded?"Payment confirmed":failed?"Payment not completed":"Payment processing"}</h1>
+    <p className="muted">{succeeded?"Your payment has been verified by the payment provider.":failed?"The provider did not confirm a successful payment. Contact the merchant if you believe this is incorrect.":"Your payment is awaiting provider confirmation. Keep this page open; the status refreshes automatically."}</p>
+    {transaction && <div className="checkout-return-details">
+      <div><span>Amount</span><strong>{cash(transaction.amountMinor,transaction.currency)}</strong></div>
+      <div><span>Reference</span><strong>{transaction.reference}</strong></div>
+      <div><span>Provider</span><strong>{label(transaction.provider)}</strong></div>
+      <div><span>Status</span><strong className={succeeded?"checkout-success":failed?"checkout-failed":"checkout-pending"}>{label(transaction.status)}</strong></div>
+      {transaction.receipt && <div><span>Receipt</span><strong>{transaction.receipt}</strong></div>}
+    </div>}
+    {error && <p className="alert error">{error}</p>}
+    <div className="form-actions"><button className="primary-button" onClick={()=>void refresh()} disabled={loading}>{loading?"Checking…":"Refresh payment status"}</button><span className="muted tiny">Last checked: {lastChecked || "—"}</span></div>
+    <p className="security-note">Do not share this status link. It grants read-only access to this payment's status until it expires.</p>
+  </section></main>;
+}
+
+const isCheckoutReturn=window.location.pathname==="/checkout/complete";
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{isCheckoutReturn ? <CheckoutReturn /> : window.location.pathname.startsWith("/admin") ? <AdminApp /> : <App />}</React.StrictMode>);

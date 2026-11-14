@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { getPool } from "./db.js";
 
-export type ProviderName = "daraja" | "pesapal";
+export type ProviderName = "daraja" | "pesapal" | "paystack";
 const providerBrand: unique symbol = Symbol("provider-system-capability");
 const workerBrand: unique symbol = Symbol("payment-worker-capability");
 

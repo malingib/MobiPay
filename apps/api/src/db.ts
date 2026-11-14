@@ -44,6 +44,7 @@ export async function withUserTransaction<T>(
   try {
     await client.query("BEGIN");
     transactionStarted = true;
+    await client.query("SET LOCAL ROLE mobipay_runtime");
     await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
     const result = await operation(client);
     await client.query("COMMIT");

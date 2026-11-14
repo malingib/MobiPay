@@ -366,7 +366,7 @@ export function validPaystackSignature(rawBody: Buffer, modernHeader: string | u
 router.post("/webhooks/paystack/:tenantId", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? "");
   const reference=String((req.body as any)?.data?.reference ?? "");
-  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9.=-]{1,120}$/.test(reference)) return res.status(400).json({error:"invalid_webhook"});
+  if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9_.=-]{1,120}$/.test(reference)) return res.status(400).json({error:"invalid_webhook"});
   const rawBody=(req as typeof req & {rawBody?:Buffer}).rawBody;
   if (!rawBody?.length) return res.status(400).json({error:"raw_body_required"});
   try {

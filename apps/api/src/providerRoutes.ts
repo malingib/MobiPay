@@ -5,6 +5,7 @@ import { z } from "zod";
 import { withUserTransaction } from "./db.js";
 import { issueProviderSystemCapability, withProviderSystemTransaction } from "./systemDb.js";
 import type { ProviderSystemCapability } from "./systemDb.js";
+import { readPublicCheckout } from "./systemDb.js";
 import { randomUUID } from "node:crypto";
 import { requireAuth, merchantCapabilityUserId } from "./auth.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
@@ -145,14 +146,7 @@ router.get("/public/checkout/:tenantId/:token", async (req,res,next) => {
   const tenantId=String(req.params.tenantId ?? ""), token=String(req.params.token ?? "");
   if (!idSchema.safeParse(tenantId).success || !/^[A-Za-z0-9_-]{40,64}$/.test(token)) return res.status(404).json({error:"checkout_not_found"});
   try {
-    const tokenHash=createHash("sha256").update(token).digest("hex");
-    const result=await withProviderSystemTransaction(issueProviderSystemCapability("paystack",tenantId,token),async(client)=>{
-      return client.query(
-        "select id,provider,merchant_reference,amount_minor,currency,status,provider_receipt,confirmed_at,created_at from public.payment_transactions where tenant_id=$1 and public_checkout_token_hash=$2 and public_checkout_expires_at>now()",
-        [tenantId,tokenHash],
-      );
-    });
-    const row=result.rows[0];
+    const row=await readPublicCheckout(tenantId,token);
     if (!row) return res.status(404).json({error:"checkout_not_found"});
     return res.json({transaction:{id:row.id,provider:row.provider,reference:row.merchant_reference,amountMinor:Number(row.amount_minor),currency:row.currency,status:row.status,receipt:row.provider_receipt,confirmedAt:row.confirmed_at,createdAt:row.created_at}});
   } catch(error) { return next(error); }

@@ -5,6 +5,8 @@ export interface MobiPayClientOptions {
   accessToken?: AccessTokenProvider;
   fetch?: FetchLike;
 }
+export interface CheckoutResult { transactionId: string; status: string; redirectUrl?: string; reference?: string; message?: string; idempotentReplay?: boolean; }
+export interface PublicCheckoutStatus { transaction: { id:string; provider:string; reference:string; amountMinor:number; currency:string; status:string; receipt?:string|null; confirmedAt?:string|null; createdAt?:string }; }
 export interface PaymentRequest {
   amountMinor: number;
   merchantReference: string;
@@ -36,7 +38,7 @@ export declare class MobiPayClient {
   listTenants(): Promise<unknown>;
   listTransactions(tenantId: string): Promise<unknown>;
   initiateDarajaStkPush(tenantId: string, payload: DarajaStkRequest, idempotencyKey: string): Promise<unknown>;
-  createPesapalCheckout(tenantId: string, payload: HostedCheckoutRequest, idempotencyKey: string): Promise<unknown>;
-  createPaystackCheckout(tenantId: string, payload: PaystackCheckoutRequest, idempotencyKey: string): Promise<unknown>;
-  getPublicCheckoutStatus(tenantId: string, token: string): Promise<unknown>;
+  createPesapalCheckout(tenantId: string, payload: HostedCheckoutRequest, idempotencyKey: string): Promise<CheckoutResult>;
+  createPaystackCheckout(tenantId: string, payload: PaystackCheckoutRequest, idempotencyKey: string): Promise<CheckoutResult>;
+  getPublicCheckoutStatus(tenantId: string, token: string): Promise<PublicCheckoutStatus>;
 }

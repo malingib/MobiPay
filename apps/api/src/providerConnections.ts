@@ -25,7 +25,7 @@ const pesapalCredentials = z.object({
 }).strict();
 const paystackCredentials = z.object({
   secretKey: z.string().trim().min(20).max(512).regex(/^sk_test_[A-Za-z0-9]+$/),
-  webhookSecret: z.string().trim().min(20).max(512).optional(),
+  webhookSecret: z.string().trim().min(20).max(512).regex(/^whsec_[A-Za-z0-9_-]+$/),
 }).strict();
 
 type ProviderCredentials = z.infer<typeof darajaCredentials> | z.infer<typeof pesapalCredentials> | z.infer<typeof paystackCredentials>;

@@ -205,7 +205,7 @@ export async function processPaystackCheckoutRecovery(batchSize = 1): Promise<{ 
         continue;
       }
       if(status==="pending"){
-        await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
+        const updated=await withPaymentWorkerTransaction(workerCapability,(client)=>client.query(
           "update public.payment_transactions set provider_status='pending',provider_verification_next_at=now()+interval '60 seconds',provider_verification_lease_token=null,provider_verification_lease_expires_at=null,provider_verification_last_error=null,updated_at=now() where id=$1 and tenant_id=$2 and provider_verification_lease_token=$3 and status in ('pending','unknown') returning id",
           [transaction.id,transaction.tenant_id,leaseToken],
         ));

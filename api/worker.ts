@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { processDueMerchantWebhookDeliveries } from "../apps/api/src/merchantWebhookWorker.js";
-import { processRetryableProviderEvents } from "../apps/api/src/providerEventRecoveryWorker.js";
+import { processRetryableProviderEvents, processPaystackCheckoutRecovery } from "../apps/api/src/providerEventRecoveryWorker.js";
 
 type WorkerRequest = { method?: string; headers: Record<string, string | string[] | undefined> };
 type WorkerResponse = {
@@ -25,9 +25,10 @@ export default async function handler(req: WorkerRequest, res: WorkerResponse) {
   const value=Array.isArray(authorization)?authorization[0]:authorization;
   if (!authorized(value,process.env.WORKER_CRON_SECRET)) return res.status(401).json({error:"unauthorized"});
   try {
-    const providerEvents=await processRetryableProviderEvents(10);
-    const merchantWebhooks=await processDueMerchantWebhookDeliveries(20);
-    return res.status(200).json({status:"completed",providerEvents,merchantWebhooks,processedAt:new Date().toISOString()});
+    const providerEvents=await processRetryableProviderEvents(1);
+    const paystackCheckouts=await processPaystackCheckoutRecovery(1);
+    const merchantWebhooks=await processDueMerchantWebhookDeliveries(2);
+    return res.status(200).json({status:"completed",providerEvents,paystackCheckouts,merchantWebhooks,processedAt:new Date().toISOString()});
   } catch {
     return res.status(503).json({error:"worker_iteration_failed"});
   }

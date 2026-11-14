@@ -62,3 +62,15 @@ create index if not exists payment_transactions_paystack_pending_idx
 create index if not exists payment_transactions_public_checkout_token_idx
   on public.payment_transactions(tenant_id, public_checkout_token_hash)
   where public_checkout_token_hash is not null;
+
+
+-- A valid high-entropy checkout token grants read-only access to its own transaction.
+drop policy if exists payment_transaction_read on public.payment_transactions;
+create policy payment_transaction_read on public.payment_transactions
+  for select using (
+    public.is_payment_tenant_member(tenant_id)
+    or (
+      public_checkout_token_hash is not null
+      and public_checkout_token_hash = nullif(current_setting('app.public_checkout_token_hash', true), '')
+    )
+  );

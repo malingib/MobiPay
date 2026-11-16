@@ -40,6 +40,9 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 30
+    },
+    "api/worker.ts": {
+      "maxDuration": 60
     }
   }
 }

@@ -6,11 +6,12 @@ import { withUserTransaction } from "./db.js";
 import { withPaymentWorkerTransaction, withProviderSystemTransaction } from "./systemDb.js";
 import type { PaymentWorkerCapability, ProviderSystemCapability } from "./systemDb.js";
 import { requireAuth, merchantCapabilityUserId } from "./auth.js";
+import { verifyPaystackCredentials } from "./providers.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
 
 const router = Router();
 const idSchema = z.string().uuid();
-const providerSchema = z.enum(["daraja", "pesapal"]);
+const providerSchema = z.enum(["daraja", "pesapal", "paystack"]);
 const darajaCredentials = z.object({
   consumerKey: z.string().trim().min(8).max(512),
   consumerSecret: z.string().min(8).max(512),
@@ -22,8 +23,12 @@ const pesapalCredentials = z.object({
   consumerSecret: z.string().min(8).max(512),
   ipnId: z.string().trim().min(1).max(256),
 }).strict();
+const paystackCredentials = z.object({
+  secretKey: z.string().trim().min(20).max(512).regex(/^sk_test_[A-Za-z0-9]+$/),
+  webhookSecret: z.string().trim().min(20).max(512).regex(/^whsec_[A-Za-z0-9_-]+$/),
+}).strict();
 
-type ProviderCredentials = z.infer<typeof darajaCredentials> | z.infer<typeof pesapalCredentials>;
+type ProviderCredentials = z.infer<typeof darajaCredentials> | z.infer<typeof pesapalCredentials> | z.infer<typeof paystackCredentials>;
 
 function encryptionKey() {
   const encoded = process.env.PROVIDER_CREDENTIALS_ENCRYPTION_KEY;
@@ -62,7 +67,7 @@ async function memberRole(capability: MerchantDatabaseCapability, tenantId: stri
   });
 }
 
-async function verifySandbox(provider: "daraja" | "pesapal", credentials: ProviderCredentials) {
+async function verifySandbox(provider: "daraja" | "pesapal" | "paystack", credentials: ProviderCredentials) {
   if (provider === "daraja" && "shortCode" in credentials) {
     const response = await fetch("https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials", {
       headers: { authorization: "Basic " + Buffer.from(`${credentials.consumerKey}:${credentials.consumerSecret}`).toString("base64") },
@@ -81,6 +86,10 @@ async function verifySandbox(provider: "daraja" | "pesapal", credentials: Provid
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok || typeof body.token !== "string") throw new Error("provider_credentials_rejected");
+    return;
+  }
+  if (provider === "paystack" && "secretKey" in credentials) {
+    await verifyPaystackCredentials(credentials);
     return;
   }
   throw new Error("provider_credentials_invalid");
@@ -107,7 +116,7 @@ router.put("/tenants/:tenantId/provider-connections/:provider", async (req, res,
   const tenantId = String(req.params.tenantId ?? "");
   const providerParsed = providerSchema.safeParse(req.params.provider);
   if (!idSchema.safeParse(tenantId).success || !providerParsed.success) return res.status(400).json({ error: "invalid_request" });
-  const parsed = providerParsed.data === "daraja" ? darajaCredentials.safeParse(req.body) : pesapalCredentials.safeParse(req.body);
+  const parsed = providerParsed.data === "daraja" ? darajaCredentials.safeParse(req.body) : providerParsed.data === "pesapal" ? pesapalCredentials.safeParse(req.body) : paystackCredentials.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_credentials", details: parsed.error.flatten() });
   try {
     const role = await memberRole(req.merchantDbCapability!, tenantId);
@@ -207,7 +216,7 @@ type ProviderCredentialAccess =
 
 export async function getTenantProviderCredentials(
   tenantId: string,
-  provider: "daraja" | "pesapal",
+  provider: "daraja" | "pesapal" | "paystack",
   access: ProviderCredentialAccess,
 ): Promise<ProviderCredentials> {
   const read = async (client: import("pg").PoolClient) => client.query(

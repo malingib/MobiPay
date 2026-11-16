@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { getPool } from "./db.js";
 
-export type ProviderName = "daraja" | "pesapal";
+export type ProviderName = "daraja" | "pesapal" | "paystack";
 const providerBrand: unique symbol = Symbol("provider-system-capability");
 const workerBrand: unique symbol = Symbol("payment-worker-capability");
 
@@ -76,4 +76,19 @@ export async function withPaymentWorkerTransaction<T>(
 
 export function newLeaseToken(): string {
   return randomUUID();
+}
+
+
+/** Read-only public checkout status, authorized by an unguessable 256-bit bearer token. */
+export async function readPublicCheckout(tenantId: string, token: string) {
+  if (!/^[A-Za-z0-9_-]{40,64}$/.test(token)) return undefined;
+  const tokenHash=createHash("sha256").update(token).digest("hex");
+  const result=await inTransaction(async(client)=>{
+    await client.query("select set_config('app.public_checkout_token_hash',$1,true)",[tokenHash]);
+    return client.query(
+      "select id,provider,merchant_reference,amount_minor,currency,status,provider_receipt,confirmed_at,created_at from public.payment_transactions where tenant_id=$1 and public_checkout_token_hash=$2 and public_checkout_expires_at>now()",
+      [tenantId,tokenHash],
+    );
+  });
+  return result.rows[0] as {id:string;provider:string;merchant_reference:string;amount_minor:string|number;currency:string;status:string;provider_receipt:string|null;confirmed_at:string|null;created_at:string}|undefined;
 }

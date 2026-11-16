@@ -31,7 +31,7 @@ export function createApp() {
     },
     credentials: true,
   }));
-  app.use(express.json({ limit: "2mb", type: "application/json" }));
+  app.use(express.json({ limit: "2mb", type: "application/json", verify: (req, _res, body) => { (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(body); } }));
   app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: "draft-8", legacyHeaders: false }));
   app.get("/health", (_req, res) => res.status(200).json({ service: "mobiwave-payments-api", status: "ok", mode: process.env.NODE_ENV ?? "development" }));
   app.get("/ready", async (_req, res) => {

@@ -1,9 +1,30 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { NextFunction, Request, Response } from "express";
 
+const merchantCapabilityBrand: unique symbol = Symbol("merchant-database-capability");
+export interface MerchantDatabaseCapability {
+  readonly [merchantCapabilityBrand]: true;
+}
+const merchantCapabilities = new WeakMap<object, string>();
+
+/** Internal auth-boundary factory. Call only after successful JWT verification. */
+export function issueMerchantDatabaseCapability(verifiedUserId: string): MerchantDatabaseCapability {
+  if (typeof verifiedUserId !== "string" || !verifiedUserId.trim() || verifiedUserId.length > 256) {
+    throw new Error("Verified merchant identity is required");
+  }
+  const capability = Object.freeze({ [merchantCapabilityBrand]: true as const });
+  merchantCapabilities.set(capability, verifiedUserId);
+  return capability;
+}
+export function merchantCapabilityUserId(value: unknown): string | undefined {
+  return typeof value === "object" && value !== null ? merchantCapabilities.get(value) : undefined;
+}
 declare global {
   namespace Express {
-    interface Request { authUser?: { id: string; claims: JWTPayload } }
+    interface Request {
+      authUser?: { id: string; claims: JWTPayload };
+      merchantDbCapability?: MerchantDatabaseCapability;
+    }
   }
 }
 
@@ -31,6 +52,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ error: "invalid_identity" });
     }
     req.authUser = { id: payload.sub, claims: payload };
+    req.merchantDbCapability = issueMerchantDatabaseCapability(payload.sub);
     return next();
   } catch {
     return res.status(401).json({ error: "invalid_token" });

@@ -50,6 +50,7 @@ router.get("/security/database-role", async (req, res, next) => {
     const security = await withPlatformAdminTransaction(req.platformAdminCapability!, async (client) => {
       const result = await client.query(`
         select current_user as runtime_role,
+          session_user as connection_role,
           r.rolsuper as is_superuser,
           r.rolbypassrls as bypasses_rls,
           (select count(*)::int from pg_class c join pg_namespace n on n.oid=c.relnamespace

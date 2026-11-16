@@ -7,7 +7,7 @@ import providerRoutes from "./providerRoutes.js";
 import providerConnectionRoutes from "./providerConnections.js";
 import platformAdminRoutes from "./platformAdminRoutes.js";
 import platformAdminSessionRoutes from "./platformAdminSessionRoutes.js";
-import { getPool } from "./db.js";
+import { checkRuntimeDatabaseReadiness } from "./db.js";
 
 export function createApp() {
   const app = express();
@@ -35,7 +35,7 @@ export function createApp() {
   app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: "draft-8", legacyHeaders: false }));
   app.get("/health", (_req, res) => res.status(200).json({ service: "mobiwave-payments-api", status: "ok", mode: process.env.NODE_ENV ?? "development" }));
   app.get("/ready", async (_req, res) => {
-    try { await getPool().query("select 1"); return res.status(200).json({ status: "ready", database: "connected" }); }
+    try { await checkRuntimeDatabaseReadiness(); return res.status(200).json({ status: "ready", database: "connected", runtimeRole: "mobipay_runtime" }); }
     catch { return res.status(503).json({ status: "not_ready", database: "unavailable" }); }
   });
   app.get("/api/v1", (_req, res) => res.status(200).json({ name: "MobiWave Payments API", version: "v1", status: "foundation", livePaymentsEnabled: false }));

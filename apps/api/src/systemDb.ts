@@ -43,6 +43,7 @@ async function inTransaction<T>(operation: (client: pg.PoolClient) => Promise<T>
   try {
     await client.query("BEGIN");
     active = true;
+    await client.query("SET LOCAL ROLE mobipay_runtime");
     const result = await operation(client);
     await client.query("COMMIT");
     active = false;
@@ -62,7 +63,12 @@ export async function withProviderSystemTransaction<T>(
 ): Promise<T> {
   const scope = providerCapabilityScope(capability);
   if (!scope) throw new Error("A provider-system capability issued by the callback boundary is required");
-  return inTransaction((client) => operation(client, scope), pool);
+  return inTransaction(async (client) => {
+    await client.query("SELECT set_config('app.provider_system_tenant_id', $1, true)", [scope.tenantId]);
+    await client.query("SELECT set_config('app.provider_system_provider', $1, true)", [scope.provider]);
+    await client.query("SELECT set_config('app.provider_system_event_id', $1, true)", [scope.eventId]);
+    return operation(client, scope);
+  }, pool);
 }
 
 export async function withPaymentWorkerTransaction<T>(
@@ -71,7 +77,10 @@ export async function withPaymentWorkerTransaction<T>(
   pool?: Pick<pg.Pool, "connect">,
 ): Promise<T> {
   if (!isPaymentWorkerCapability(capability)) throw new Error("A payment-worker capability is required");
-  return inTransaction(operation, pool);
+  return inTransaction(async (client) => {
+    await client.query("SELECT set_config('app.payment_worker', $1, true)", ["true"]);
+    return operation(client);
+  }, pool);
 }
 
 export function newLeaseToken(): string {

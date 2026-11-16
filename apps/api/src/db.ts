@@ -44,6 +44,7 @@ export async function withUserTransaction<T>(
   try {
     await client.query("BEGIN");
     transactionStarted = true;
+    await client.query("SET LOCAL ROLE mobipay_runtime");
     await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
     const result = await operation(client);
     await client.query("COMMIT");
@@ -51,6 +52,28 @@ export async function withUserTransaction<T>(
     return result;
   } catch (error) {
     if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+
+/** Readiness must verify the effective NOBYPASSRLS role, not merely the login connection. */
+export async function checkRuntimeDatabaseReadiness(
+  dbPool: Pick<pg.Pool, "connect"> = getPool(),
+): Promise<void> {
+  const client=await dbPool.connect();
+  let transactionStarted=false;
+  try {
+    await client.query("BEGIN");
+    transactionStarted=true;
+    await client.query("SET LOCAL ROLE mobipay_runtime");
+    await client.query("SELECT 1");
+    await client.query("COMMIT");
+    transactionStarted=false;
+  } catch(error) {
+    if(transactionStarted) await client.query("ROLLBACK").catch(()=>undefined);
     throw error;
   } finally {
     client.release();

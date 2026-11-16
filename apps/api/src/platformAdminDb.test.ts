@@ -38,7 +38,7 @@ test("platform admin DB path accepts only a session-middleware-issued capability
     assert.equal(nextCalled,true);
     const actor=await withPlatformAdminTransaction(req.platformAdminCapability,async(_client,username)=>username,f.pool);
     assert.equal(actor,"ops");
-    assert.deepEqual(f.calls,["BEGIN","COMMIT"]);
+    assert.deepEqual(f.calls,["BEGIN","SET LOCAL ROLE mobipay_runtime","SELECT set_config('app.platform_admin', $1, true)","COMMIT"]);
     assert.equal(f.released,1);
   } finally {
     if(prior===undefined) delete process.env.PLATFORM_ADMIN_SESSION_SECRET;
@@ -56,7 +56,7 @@ test("platform admin DB path rolls back failed writes", async () => {
     const res={status(){return this;},json(){return this;}} as any;
     requirePlatformAdmin(req,res,()=>undefined);
     await assert.rejects(withPlatformAdminTransaction(req.platformAdminCapability,async()=>{throw new Error("admin write failed");},f.pool),/admin write failed/);
-    assert.deepEqual(f.calls,["BEGIN","ROLLBACK"]);
+    assert.deepEqual(f.calls,["BEGIN","SET LOCAL ROLE mobipay_runtime","SELECT set_config('app.platform_admin', $1, true)","ROLLBACK"]);
     assert.equal(f.released,1);
   } finally {
     if(prior===undefined) delete process.env.PLATFORM_ADMIN_SESSION_SECRET;

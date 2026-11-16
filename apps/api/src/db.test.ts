@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Pool, PoolClient } from "pg";
-import { withUserTransaction } from "./db.js";
+import { checkRuntimeDatabaseReadiness, withUserTransaction } from "./db.js";
 import { issueMerchantDatabaseCapability } from "./auth.js";
 
 function fixture() {
@@ -30,6 +30,7 @@ test("withUserTransaction sets verified identity transaction-locally on the chec
   assert.equal(result, "ok");
   assert.deepEqual(f.calls, [
     { sql: "BEGIN", values: undefined },
+    { sql: "SET LOCAL ROLE mobipay_runtime", values: undefined },
     { sql: "SELECT set_config('app.user_id', $1, true)", values: ["auth0|verified-user"] },
     { sql: "select 42", values: undefined },
     { sql: "COMMIT", values: undefined },
@@ -47,6 +48,7 @@ test("withUserTransaction rolls back on operation failure and always releases th
   );
   assert.deepEqual(f.calls.map((call) => call.sql), [
     "BEGIN",
+    "SET LOCAL ROLE mobipay_runtime",
     "SELECT set_config('app.user_id', $1, true)",
     "ROLLBACK",
   ]);
@@ -64,4 +66,12 @@ test("withUserTransaction rejects missing identity before checking out a connect
     /verified merchant database capability is required/,
   );
   assert.equal(connects, 0);
+});
+
+
+test("readiness verifies the NOBYPASSRLS role on a transaction-local connection", async () => {
+  const f=fixture();
+  await checkRuntimeDatabaseReadiness(f.pool);
+  assert.deepEqual(f.calls.map((call)=>call.sql),["BEGIN","SET LOCAL ROLE mobipay_runtime","SELECT 1","COMMIT"]);
+  assert.equal(f.released,1);
 });

@@ -21,6 +21,8 @@ export async function withPlatformAdminTransaction<T>(
   try {
     await client.query("BEGIN");
     active = true;
+    await client.query("SET LOCAL ROLE mobipay_runtime");
+    await client.query("SELECT set_config('app.platform_admin', $1, true)", ["true"]);
     const result = await operation(client, capability.username);
     await client.query("COMMIT");
     active = false;

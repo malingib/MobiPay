@@ -54,7 +54,17 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     req.authUser = { id: payload.sub, claims: payload };
     req.merchantDbCapability = issueMerchantDatabaseCapability(payload.sub);
     return next();
-  } catch {
+  } catch (cause: unknown) {
+    // Log only the verifier's stable error identifiers. Never log the bearer
+    // token, request headers, cookies, or decoded claims.
+    const verificationError = typeof cause === "object" && cause !== null
+      ? cause as { code?: unknown; name?: unknown; claim?: unknown }
+      : undefined;
+    console.error("[auth] JWT verification failed", {
+      code: typeof verificationError?.code === "string" ? verificationError.code : "unknown",
+      name: typeof verificationError?.name === "string" ? verificationError.name : "unknown",
+      claim: typeof verificationError?.claim === "string" ? verificationError.claim : undefined,
+    });
     return res.status(401).json({ error: "invalid_token" });
   }
 }

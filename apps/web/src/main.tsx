@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { createAuthClient } from "@neondatabase/auth";
+import { createInternalNeonAuth } from "@neondatabase/auth";
 import "./styles.css";
 import AdminApp from "./admin.js";
 
 const authUrl = import.meta.env.VITE_NEON_AUTH_URL as string | undefined;
 const apiBase = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || window.location.origin).replace(/\/$/, "");
-const authClient = authUrl ? createAuthClient(authUrl) : null;
+const neonAuth = authUrl ? createInternalNeonAuth(authUrl) : null;
+const authClient = neonAuth?.adapter ?? null;
 type Page = "Overview" | "Transactions" | "Collect payment" | "Reconciliation" | "Payment providers" | "Webhooks" | "Developer API";
 type Tenant = { id: string; name: string; slug: string; role: string };
 type Connection = { provider: string; connection_status: string; enabled: boolean; environment: string; last_tested_at?: string | null; last_error_code?: string | null };
@@ -40,13 +41,10 @@ function App() {
   const [exceptionNote, setExceptionNote] = useState("");
 
   const token = useCallback(async () => {
-    if (!authClient) throw new Error("Neon Auth is not configured.");
-    // This client uses Neon Auth's default Better Auth adapter. Its token()
-    // method returns the signed JWT in data.token; session.token is only the
-    // opaque session identifier and does not authenticate merchant API calls.
-    const result = await authClient.token();
-    if (result.error) throw new Error(result.error.message || "Unable to retrieve the Neon Auth API token.");
-    const jwt = result.data?.token;
+    if (!neonAuth) throw new Error("Neon Auth is not configured.");
+    // Use the SDK's token helper. The default Better Auth adapter stores the
+    // signed JWT in session.token; session.token is not the opaque cookie ID.
+    const jwt = await neonAuth.getJWTToken();
     if (!jwt || jwt.split(".").length !== 3) {
       throw new Error("Session expired or API token unavailable. Sign in again.");
     }

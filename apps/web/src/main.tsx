@@ -41,13 +41,12 @@ function App() {
 
   const token = useCallback(async () => {
     if (!authClient) throw new Error("Neon Auth is not configured.");
-    // Read the signed JWT from the managed Better Auth session. Do not call
-    // getJWTToken() here: unsupported SDK proxy methods become HTTP routes
-    // (for example, /get-jwt-token) and return 404 on this SDK version.
-    const result = await authClient.getSession();
-    if (result.error) throw new Error(result.error.message || "Unable to restore the Neon Auth session.");
-    const session = result.data?.session as { access_token?: string } | null | undefined;
-    const jwt = session?.access_token;
+    // This client uses Neon Auth's default Better Auth adapter. Its token()
+    // method returns the signed JWT in data.token; session.token is only the
+    // opaque session identifier and does not authenticate merchant API calls.
+    const result = await authClient.token();
+    if (result.error) throw new Error(result.error.message || "Unable to retrieve the Neon Auth API token.");
+    const jwt = result.data?.token;
     if (!jwt || jwt.split(".").length !== 3) {
       throw new Error("Session expired or API token unavailable. Sign in again.");
     }

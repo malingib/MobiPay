@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { requireAuth, merchantCapabilityUserId } from "./auth.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
 import { getTenantProviderCredentials } from "./providerConnections.js";
+import { matchesIdempotentPaymentRequest } from "./idempotency.js";
 import { initiateDarajaStk, queryDarajaStk, queryPesapalStatus, sha256Payload, submitPesapalOrder, initiatePaystackCheckout, verifyPaystackTransaction } from "./providers.js";
 import type { PaystackCredentials } from "./providers.js";
 
@@ -114,14 +115,14 @@ router.post("/tenants/:tenantId/pesapal/checkout", requireAuth, async (req,res,n
     if (!key || key.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
     const outcome=await withUserTransaction<{ row: any; created: boolean }>(req.merchantDbCapability!, async (client) => {
-      const inserted=await client.query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null]);
+      const inserted=await client.query("insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_reference,payer_email) values($1,'pesapal',$2,$3,$4,'KES','created',$5,$6,$7) on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",[tenantId,d.merchantReference,key,d.amountMinor,d.description,d.phone??null,d.email??null]);
       if (inserted.rows[0]) return {row:inserted.rows[0],created:true};
-      const prior=await client.query("select id,provider,merchant_reference,amount_minor,description,payer_reference,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
+      const prior=await client.query("select id,provider,merchant_reference,amount_minor,currency,description,payer_reference,payer_email,provider_order_tracking_id,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",[tenantId,key]);
       return {row:prior.rows[0],created:false};
     });
     if (!outcome.created) {
       const row=outcome.row;
-      if (!row || row.provider!=="pesapal" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description || row.payer_reference!==(d.phone??null)) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if (!row || !matchesIdempotentPaymentRequest(row,{provider:"pesapal",merchantReference:d.merchantReference,amountMinor:d.amountMinor,currency:"KES",payerReference:d.phone??null,payerEmail:d.email??null,description:d.description})) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
       if (row.provider_order_tracking_id && row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,orderTrackingId:row.provider_order_tracking_id,idempotentReplay:true});
       return res.status(202).json({transactionId:row.id,status:row.status,message:"The provider outcome is being reconciled. Check transaction status before retrying."});
     }
@@ -168,12 +169,12 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
     if (!idempotencyKey || idempotencyKey.length>160) return res.status(400).json({error:"idempotency_key_required"});
     const d=parsed.data;
     const prior=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
-      "select id,provider,merchant_reference,amount_minor,description,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+      "select id,provider,merchant_reference,amount_minor,currency,description,payer_email,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
       [tenantId,idempotencyKey],
     ));
     if (prior.rows[0]) {
       const row=prior.rows[0];
-      if (row.provider!=="paystack" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if (!matchesIdempotentPaymentRequest(row,{provider:"paystack",merchantReference:d.merchantReference,amountMinor:d.amountMinor,currency:"KES",payerEmail:d.email,description:d.description})) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
       if (row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,reference:row.provider_payment_reference,idempotentReplay:true});
       return res.status(202).json({transactionId:row.id,status:row.status,message:"Checkout initialization is being reconciled. Do not create a new payment until status is checked."});
     }
@@ -181,8 +182,8 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
     const publicToken=Buffer.from(randomBytes(32)).toString("base64url");
     const tokenHash=createHash("sha256").update(publicToken).digest("hex");
     const inserted=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
-      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,provider_payment_reference,public_checkout_token_hash,public_checkout_expires_at) values($1,'paystack',$2,$3,$4,'KES','pending',$5,$6,$7,now()+interval '24 hours') on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",
-      [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.description,providerReference,tokenHash],
+      "insert into public.payment_transactions(tenant_id,provider,merchant_reference,idempotency_key,amount_minor,currency,status,description,payer_email,provider_payment_reference,public_checkout_token_hash,public_checkout_expires_at) values($1,'paystack',$2,$3,$4,'KES','pending',$5,$6,$7,$8,now()+interval '24 hours') on conflict (tenant_id,idempotency_key) where idempotency_key is not null do nothing returning id",
+      [tenantId,d.merchantReference,idempotencyKey,d.amountMinor,d.description,d.email,providerReference,tokenHash],
     ));
     const transactionId=inserted.rows[0]?.id as string | undefined;
     if (!transactionId) {
@@ -191,7 +192,7 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
         [tenantId,idempotencyKey],
       ));
       const row=raced.rows[0];
-      if(!row || row.provider!=="paystack" || row.merchant_reference!==d.merchantReference || Number(row.amount_minor)!==d.amountMinor || row.description!==d.description) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
+      if(!row || !matchesIdempotentPaymentRequest(row,{provider:"paystack",merchantReference:d.merchantReference,amountMinor:d.amountMinor,currency:"KES",payerEmail:d.email,description:d.description})) return res.status(409).json({error:"idempotency_key_reused_with_different_request"});
       if(row.provider_checkout_url) return res.status(200).json({transactionId:row.id,status:row.status,redirectUrl:row.provider_checkout_url,reference:row.provider_payment_reference,idempotentReplay:true});
       return res.status(202).json({transactionId:row.id,status:row.status,message:"The first request is still initializing or reconciling this checkout. Do not create another payment."});
     }

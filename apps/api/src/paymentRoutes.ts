@@ -251,7 +251,7 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
         return { row: inserted.rows[0], created: true };
       }
       const existing = await client.query(
-        "select id,provider,merchant_reference,amount_minor,currency,payer_reference,description,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        "select id,provider,merchant_reference,amount_minor,currency,payer_reference,payer_email,description,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
         [tenantId,idempotencyKey],
       );
       return { row: existing.rows[0], created: false };

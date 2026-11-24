@@ -35,7 +35,7 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 ## Migration and operational requirements
 
-Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, `neon/migrations/003_merchant_provider_security.sql`, `neon/migrations/004_platform_admin_audit.sql`, `neon/migrations/005_worker_leases.sql`, and `neon/migrations/006_tenant_bootstrap_returning.sql`, and `neon/migrations/007_provider_payer_email.sql` in order to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
+Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, `neon/migrations/003_merchant_provider_security.sql`, `neon/migrations/004_platform_admin_audit.sql`, `neon/migrations/005_worker_leases.sql`, and `neon/migrations/006_tenant_bootstrap_returning.sql`, and `neon/migrations/007_provider_payer_email.sql`, `neon/migrations/008_paystack_checkout_support.sql`, and `neon/migrations/009_runtime_security_contexts.sql` in order to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
 
 ## Deployment configuration
 

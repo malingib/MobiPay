@@ -10,6 +10,7 @@ import { verifyPaystackCredentials } from "./providers.js";
 import type { MerchantDatabaseCapability } from "./auth.js";
 
 const router = Router();
+router.use(requireAuth);
 const idSchema = z.string().uuid();
 const providerSchema = z.enum(["daraja", "pesapal", "paystack"]);
 const darajaCredentials = z.object({

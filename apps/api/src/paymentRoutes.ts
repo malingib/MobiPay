@@ -10,6 +10,7 @@ import { parseStatementCsv, sha256Statement } from "./statementImport.js";
 import { matchesIdempotentPaymentRequest } from "./idempotency.js";
 
 const router = Router();
+router.use(requireAuth);
 const tenantIdSchema = z.string().uuid();
 const createTenantSchema = z.object({
   name: z.string().trim().min(1).max(160),

@@ -19,9 +19,13 @@ alter table public.payment_transactions
   check (provider in ('daraja','pesapal','paystack','bank','manual'));
 
 alter table public.payment_transactions
+  drop constraint if exists payment_transactions_provider_verification_attempts_check;
+alter table public.payment_transactions
   add constraint payment_transactions_provider_verification_attempts_check
   check (provider_verification_attempts >= 0);
 
+alter table public.payment_transactions
+  drop constraint if exists payment_transactions_public_checkout_token_hash_check;
 alter table public.payment_transactions
   add constraint payment_transactions_public_checkout_token_hash_check
   check (public_checkout_token_hash is null or public_checkout_token_hash ~ '^[a-f0-9]{64}$');

@@ -8,6 +8,7 @@ const request = {
   amountMinor: 12500,
   currency: "KES",
   payerReference: "254712345678",
+  payerEmail: "payer@example.com",
   description: "Invoice 100",
 };
 const record = {
@@ -16,6 +17,7 @@ const record = {
   amount_minor: "12500",
   currency: "KES",
   payer_reference: "254712345678",
+  payer_email: "payer@example.com",
   description: "Invoice 100",
 };
 
@@ -35,4 +37,8 @@ test("normalizes absent optional fields to null", () => {
   const existing = { ...record, payer_reference: null, description: null };
   const requested = { ...request, payerReference: undefined, description: undefined };
   assert.equal(matchesIdempotentPaymentRequest(existing, requested), true);
+});
+
+test("rejects a replay with a changed payer email", () => {
+  assert.equal(matchesIdempotentPaymentRequest(record, { ...request, payerEmail: "other@example.com" }), false);
 });

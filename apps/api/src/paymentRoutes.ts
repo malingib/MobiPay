@@ -7,6 +7,7 @@ import type { MerchantDatabaseCapability } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
 import { reconcileRecords } from "./reconciliation.js";
 import { parseStatementCsv, sha256Statement } from "./statementImport.js";
+import { matchesIdempotentPaymentRequest } from "./idempotency.js";
 
 const router = Router();
 const tenantIdSchema = z.string().uuid();
@@ -250,7 +251,7 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
         return { row: inserted.rows[0], created: true };
       }
       const existing = await client.query(
-        "select id,provider,merchant_reference,amount_minor,currency,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        "select id,provider,merchant_reference,amount_minor,currency,payer_reference,description,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
         [tenantId,idempotencyKey],
       );
       return { row: existing.rows[0], created: false };
@@ -258,7 +259,7 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
     if (outcome.created) return res.status(201).json({ transaction: outcome.row, idempotentReplay: false });
     if (!outcome.row) return res.status(409).json({ error: "idempotency_conflict" });
     const row = outcome.row;
-    if (row.provider !== d.provider || row.merchant_reference !== d.merchantReference || Number(row.amount_minor) !== d.amountMinor || row.currency !== d.currency) {
+    if (!matchesIdempotentPaymentRequest(row, d)) {
       return res.status(409).json({ error: "idempotency_key_reused_with_different_request" });
     }
     return res.status(200).json({ transaction: row, idempotentReplay: true });

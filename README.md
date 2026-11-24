@@ -25,7 +25,7 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 - `DATABASE_URL` — dedicated Neon PostgreSQL connection string.
 - `PROVIDER_CREDENTIALS_ENCRYPTION_KEY` — base64-encoded 32-byte key for AES-256-GCM encryption of merchant-owned Daraja/Pesapal credentials. Generate with `openssl rand -base64 32`; store only in deployment secrets and preserve it securely. If lost, stored credentials cannot be decrypted.
-- `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration.
+- `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL` — your chosen identity provider's JWT verification configuration. For Neon Managed Auth, set `AUTH_ISSUER` to the Auth host origin (scheme + hostname, no `/neondb/auth` path), and keep the full `/.well-known/jwks.json` URL in `AUTH_JWKS_URL`.
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD` — dedicated platform-admin credentials; do not reuse merchant credentials.
 - `PLATFORM_ADMIN_SESSION_SECRET` — random secret of at least 32 characters. Generate with `openssl rand -base64 48`.
 - Optional `PLATFORM_ADMIN_NAME` — display name for the platform administrator.
@@ -35,7 +35,7 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 ## Migration and operational requirements
 
-Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, then `neon/migrations/003_merchant_provider_security.sql`, and finally `neon/migrations/004_platform_admin_audit.sql` to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
+Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, `neon/migrations/003_merchant_provider_security.sql`, `neon/migrations/004_platform_admin_audit.sql`, `neon/migrations/005_worker_leases.sql`, and `neon/migrations/006_tenant_bootstrap_returning.sql`, and `neon/migrations/007_provider_payer_email.sql`, `neon/migrations/008_paystack_checkout_support.sql`, and `neon/migrations/009_runtime_security_contexts.sql` in order to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
 
 ## Deployment configuration
 
@@ -51,7 +51,7 @@ The web console uses Neon Auth (Managed Better Auth) for merchant registration a
 - API variables: `AUTH_ISSUER` (the exact issuer value emitted in Neon Auth JWTs), `AUTH_JWKS_URL` (the branch JWKS URL), and optionally `AUTH_AUDIENCE` only if the configured token includes an audience that should be enforced.
 - Set custom SMTP and verify email before production; do not rely on shared development email delivery for launch.
 
-The sign-up screen creates a Neon Auth user; the authenticated user can then create a merchant workspace. Workspace creation makes that user its owner. API requests send a short-lived Neon Auth JWT in the Authorization header. The API validates the signature using the configured JWKS and validates issuer before processing requests.
+The sign-up screen creates a Neon Auth user; the authenticated user can then create a merchant workspace. Workspace creation makes that user its owner. Migration 006 grants a narrowly scoped SELECT policy during the server-only tenant bootstrap transaction because PostgreSQL applies SELECT RLS to `INSERT ... RETURNING`. API requests send a short-lived Neon Auth JWT in the Authorization header. The API validates the signature using the configured JWKS and validates issuer before processing requests.
 
 ## Merchant onboarding and provider connections
 
@@ -71,6 +71,6 @@ Provider credentials are scoped to a tenant and are not shared between merchants
 - Add alerts, backups, restore tests, structured monitoring, and incident-response procedures.
 - Obtain provider and Kenyan legal/regulatory confirmation before live collection or fund movement.
 
-Statement CSV parsing/import API and the reconciliation exception review UI are implemented, including content-hash deduplication and conservative matching. Recurring statement ingestion remains pending until each bank/provider integration, credentials, polling schedule, and reliable scheduled worker are configured. Provider-event recovery and merchant webhook delivery worker functions exist, but a durable production scheduler/worker deployment must be configured before relying on retries or webhook delivery. Early callbacks are persisted with their payloads for recovery.
+Statement CSV parsing/import API and the reconciliation exception review UI are implemented, including content-hash deduplication and conservative matching. Recurring statement ingestion remains pending until each bank/provider integration, credentials, polling schedule, and reliable scheduled worker are configured. Provider-event recovery and merchant webhook delivery workers use database-backed lease tokens and expiry timestamps from migration 005. A durable scheduler must call the protected `/api/worker` endpoint on a recurring schedule before relying on retries or webhook delivery. Early callbacks are persisted with their payloads for recovery.
 
 The platform does not hold customer funds by design. Never store card data, M-Pesa PINs, bank passwords, or live provider secrets in source control.

@@ -7,8 +7,10 @@ import type { MerchantDatabaseCapability } from "./auth.js";
 import { assertSafeWebhookUrl } from "./merchantWebhookWorker.js";
 import { reconcileRecords } from "./reconciliation.js";
 import { parseStatementCsv, sha256Statement } from "./statementImport.js";
+import { matchesIdempotentPaymentRequest } from "./idempotency.js";
 
 const router = Router();
+router.use(requireAuth);
 const tenantIdSchema = z.string().uuid();
 const createTenantSchema = z.object({
   name: z.string().trim().min(1).max(160),
@@ -250,7 +252,7 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
         return { row: inserted.rows[0], created: true };
       }
       const existing = await client.query(
-        "select id,provider,merchant_reference,amount_minor,currency,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        "select id,provider,merchant_reference,amount_minor,currency,payer_reference,payer_email,description,status,created_at from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
         [tenantId,idempotencyKey],
       );
       return { row: existing.rows[0], created: false };
@@ -258,11 +260,39 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
     if (outcome.created) return res.status(201).json({ transaction: outcome.row, idempotentReplay: false });
     if (!outcome.row) return res.status(409).json({ error: "idempotency_conflict" });
     const row = outcome.row;
-    if (row.provider !== d.provider || row.merchant_reference !== d.merchantReference || Number(row.amount_minor) !== d.amountMinor || row.currency !== d.currency) {
+    if (!matchesIdempotentPaymentRequest(row, d)) {
       return res.status(409).json({ error: "idempotency_key_reused_with_different_request" });
     }
     return res.status(200).json({ transaction: row, idempotentReplay: true });
   } catch (error) { return next(error); }
+});
+
+router.get("/tenants/:tenantId/reconciliation/runs", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
+  try {
+    if (!await membership(req.merchantDbCapability!,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const requested=Number(req.query.limit ?? 50);
+    const limit=Number.isFinite(requested) ? Math.max(1,Math.min(100,Math.trunc(requested))) : 50;
+    const result=await withUserTransaction(req.merchantDbCapability!,client=>client.query(
+      "select id,provider,source_name,status,rows_total,rows_matched,rows_unmatched,rows_exception,created_at,completed_at from public.payment_reconciliation_runs where tenant_id=$1 order by created_at desc limit $2",
+      [tenantId,limit],
+    ));
+    return res.json({runs:result.rows});
+  } catch(error) { return next(error); }
+});
+
+router.get("/tenants/:tenantId/reconciliation/runs/:runId/records", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? ""), runId=String(req.params.runId ?? "");
+  if (!validTenantParam(tenantId) || !validTenantParam(runId)) return res.status(400).json({error:"invalid_id"});
+  try {
+    if (!await membership(req.merchantDbCapability!,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const result=await withUserTransaction(req.merchantDbCapability!,client=>client.query(
+      "select id,provider,provider_reference,merchant_reference,amount_minor,currency,occurred_at,reconciliation_status,transaction_id,reason,created_at from public.payment_reconciliation_records where tenant_id=$1 and run_id=$2 order by created_at asc limit 1000",
+      [tenantId,runId],
+    ));
+    return res.json({records:result.rows});
+  } catch(error) { return next(error); }
 });
 
 router.get("/tenants/:tenantId/exceptions", async (req, res, next) => {

@@ -13,6 +13,8 @@ type Tenant = { id: string; name: string; slug: string; role: string };
 type Connection = { provider: string; connection_status: string; enabled: boolean; environment: string; last_tested_at?: string | null; last_error_code?: string | null };
 type Tx = { id: string; provider: string; merchant_reference: string; amount_minor: number; currency: string; status: string; payer_reference?: string | null; description?: string | null; provider_receipt?: string | null; provider_status?: string | null; created_at: string; confirmed_at?: string | null };
 type Exception = { id: string; provider: string; provider_reference?: string | null; exception_type: string; status: string; details?: Record<string, unknown>; created_at: string; resolution_note?: string | null };
+type ReconciliationRun = { id: string; provider: string; source_name: string; status: string; rows_total: number; rows_matched: number; rows_unmatched: number; rows_exception: number; created_at: string; completed_at?: string | null };
+type ReconciliationRecord = { id: string; provider_reference?: string | null; merchant_reference?: string | null; amount_minor: number; currency: string; occurred_at?: string | null; reconciliation_status: string; transaction_id?: string | null; reason?: string | null };
 type Webhook = { id: string; url: string; subscribed_events: string[]; enabled: boolean; created_at: string };
 type Provider = "daraja" | "pesapal" | "paystack";
 const pages: Page[] = ["Overview", "Transactions", "Collect payment", "Reconciliation", "Payment providers", "Webhooks", "Developer API"];
@@ -29,6 +31,7 @@ function App() {
   const [page, setPage] = useState<Page>("Overview"); const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true);
   const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const [transactions, setTransactions] = useState<Tx[]>([]); const [exceptions, setExceptions] = useState<Exception[]>([]);
+  const [reconciliationRuns, setReconciliationRuns] = useState<ReconciliationRun[]>([]); const [selectedReconciliationRunId, setSelectedReconciliationRunId] = useState(""); const [reconciliationRecords, setReconciliationRecords] = useState<ReconciliationRecord[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]); const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [search, setSearch] = useState(""); const [statusFilter, setStatusFilter] = useState("all");
   const [checkoutProvider, setCheckoutProvider] = useState<Provider>("daraja"); const [connectionProvider, setConnectionProvider] = useState<Provider>("daraja");
@@ -68,16 +71,20 @@ function App() {
   const loadWorkspace = useCallback(async () => {
     if (!tenantId) return;
     const id = encodeURIComponent(tenantId);
-    const [tx, recon, conn, hooks] = await Promise.all([
+    const [tx, recon, conn, hooks, runs] = await Promise.all([
       api(`/api/v1/tenants/${id}/transactions?limit=200`),
       api(`/api/v1/tenants/${id}/exceptions`),
       api(`/api/v1/tenants/${id}/provider-connections`),
-      api(`/api/v1/tenants/${id}/webhook-endpoints`)
+      api(`/api/v1/tenants/${id}/webhook-endpoints`),
+      api(`/api/v1/tenants/${id}/reconciliation/runs?limit=50`)
     ]);
     setTransactions((tx.transactions ?? []) as Tx[]);
     setExceptions((recon.exceptions ?? []) as Exception[]);
     setConnections((conn.connections ?? []) as Connection[]);
     setWebhooks((hooks.endpoints ?? []) as Webhook[]);
+    const items = (runs.runs ?? []) as ReconciliationRun[];
+    setReconciliationRuns(items);
+    setSelectedReconciliationRunId((current) => items.some((item) => item.id === current) ? current : (items[0]?.id ?? ""));
   }, [api, tenantId]);
 
   useEffect(() => {
@@ -88,6 +95,19 @@ function App() {
   }, []);
   useEffect(() => { if (user) void loadTenants().catch((e: unknown) => setError(errorMessage(e))); }, [user, loadTenants]);
   useEffect(() => { if (user && tenantId) void loadWorkspace().catch((e: unknown) => setError(errorMessage(e))); }, [user, tenantId, loadWorkspace]);
+  useEffect(() => {
+    let active = true;
+    if (!user || !tenantId || !selectedReconciliationRunId) {
+      setReconciliationRecords([]);
+      return () => { active = false; };
+    }
+    const tenant = encodeURIComponent(tenantId);
+    const run = encodeURIComponent(selectedReconciliationRunId);
+    api(`/api/v1/tenants/${tenant}/reconciliation/runs/${run}/records`)
+      .then((result) => { if (active) setReconciliationRecords((result.records ?? []) as ReconciliationRecord[]); })
+      .catch((e: unknown) => { if (active) setError(errorMessage(e)); });
+    return () => { active = false; };
+  }, [api, user, tenantId, selectedReconciliationRunId]);
 
   async function action(fn: () => Promise<unknown>, success: string) {
     setBusy(true); setError(""); setNotice("");
@@ -186,7 +206,7 @@ function App() {
       link.href = url; link.download = "mobiwave-transactions.csv"; link.click(); URL.revokeObjectURL(url); setNotice("Transaction export downloaded.");
     } catch (e) { setError(errorMessage(e)); }
   }
-  async function signOut() { try { await authClient?.signOut(); } finally { setUser(null); setTenants([]); setTenantId(""); setTransactions([]); setExceptions([]); setConnections([]); setWebhooks([]); } }
+  async function signOut() { try { await authClient?.signOut(); } finally { setUser(null); setTenants([]); setTenantId(""); setTransactions([]); setExceptions([]); setReconciliationRuns([]); setSelectedReconciliationRunId(""); setReconciliationRecords([]); setConnections([]); setWebhooks([]); } }
 
   const visibleTransactions = useMemo(() => transactions.filter((t) => {
     const haystack = [t.id, t.provider, t.merchant_reference, t.payer_reference, t.status, t.provider_receipt].join(" ").toLowerCase();
@@ -238,7 +258,40 @@ function App() {
           </>}
           <div className="form-actions"><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save encrypted credentials"}</button><span className="muted tiny">Saving does not initiate a payment.</span></div>
         </form></section></>}
-      {tenantId && page === "Reconciliation" && <><section className="panel form-panel"><div className="panel-heading"><div><h2>Import provider statement</h2><p className="muted">CSV import is deduplicated by content hash. Matching is conservative; mismatches require review.</p></div></div><p className="code-hint">Required columns: provider_reference, merchant_reference, amount_minor, currency. Optional: occurred_at.</p><form className="form-grid" onSubmit={importStatement}><label>Provider<select value={statementProvider} onChange={(e) => setStatementProvider(e.target.value)}>{["daraja","pesapal","paystack","bank","manual"].map((s) => <option key={s} value={s}>{label(s)}</option>)}</select></label><label>Statement name<input value={statementName} onChange={(e) => setStatementName(e.target.value)} placeholder="October statement.csv"/></label><label className="full-field">CSV statement file<input type="file" accept=".csv,text/csv" onChange={async (e) => { const file = e.currentTarget.files?.[0]; if (!file) return; setStatementName(file.name); setStatementCsv(await file.text()); }} /><small className="muted">Choose a CSV file or paste/edit its content below. Maximum file size: 1.8 MB.</small></label><label className="full-field">CSV content<textarea value={statementCsv} onChange={(e) => setStatementCsv(e.target.value)} rows={5} required placeholder={"provider_reference,merchant_reference,amount_minor,currency\nABC123,INV-001,10000,KES"}/></label><div className="form-actions"><button className="primary-button" disabled={busy || !statementCsv.trim()}>{busy ? "Reconciling…" : "Import and reconcile"}</button></div></form></section><section className="panel"><div className="panel-heading"><div><h2>Exceptions</h2><p className="muted">A statement match alone never confirms a payment.</p></div></div>{exceptions.length ? <div className="exception-list">{exceptions.map((item) => <article className="exception" key={item.id}><div><strong>{label(item.exception_type)}</strong><small>{item.provider} · {item.provider_reference || "No provider reference"} · {stamp(item.created_at)}</small><p>{String(item.details?.reason ?? item.details?.status ?? item.resolution_note ?? "Manual review required.")}</p></div><div className="exception-actions"><Status value={item.status}/>{!["resolved","dismissed"].includes(item.status) && <><input aria-label="Resolution note" placeholder="Resolution note" value={exceptionNote} onChange={(e) => setExceptionNote(e.target.value)}/><button className="secondary-button" disabled={busy} onClick={() => void resolveException(item,"resolved")}>Resolve</button><button className="secondary-button" disabled={busy} onClick={() => void resolveException(item,"dismissed")}>Dismiss</button></>}</div></article>)}</div> : <Empty>No reconciliation exceptions yet. Import a provider statement to begin.</Empty>}</section></>}
+      {tenantId && page === "Reconciliation" && <>
+        <section className="panel form-panel">
+          <div className="panel-heading"><div><h2>Import provider statement</h2><p className="muted">CSV import is deduplicated by content hash. Matching is conservative; mismatches require review.</p></div></div>
+          <p className="code-hint">Required columns: provider_reference, merchant_reference, amount_minor, currency. Optional: occurred_at.</p>
+          <form className="form-grid" onSubmit={importStatement}>
+            <label>Provider<select value={statementProvider} onChange={(e) => setStatementProvider(e.target.value)}>{["daraja","pesapal","paystack","bank","manual"].map((s) => <option key={s} value={s}>{label(s)}</option>)}</select></label>
+            <label>Statement name<input value={statementName} onChange={(e) => setStatementName(e.target.value)} placeholder="October statement.csv"/></label>
+            <label className="full-field">CSV statement file<input type="file" accept=".csv,text/csv" onChange={async (e) => { const file = e.currentTarget.files?.[0]; if (!file) return; setStatementName(file.name); setStatementCsv(await file.text()); }} /><small className="muted">Choose a CSV file or paste/edit its content below. Maximum file size: 1.8 MB.</small></label>
+            <label className="full-field">CSV content<textarea value={statementCsv} onChange={(e) => setStatementCsv(e.target.value)} rows={5} required placeholder={"provider_reference,merchant_reference,amount_minor,currency\nABC123,INV-001,10000,KES"}/></label>
+            <div className="form-actions"><button className="primary-button" disabled={busy || !statementCsv.trim()}>{busy ? "Reconciling…" : "Import and reconcile"}</button></div>
+          </form>
+        </section>
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Reconciliation history</h2><p className="muted">Imported statements, match outcomes and row-level review.</p></div><button className="secondary-button" disabled={busy} onClick={() => void loadWorkspace().catch((e: unknown) => setError(errorMessage(e)))}>Refresh</button></div>
+          {reconciliationRuns.length ? <div className="exception-list">{reconciliationRuns.map((run) => <article className="exception" key={run.id}>
+            <div><strong>{run.source_name}</strong><small>{label(run.provider)} · {stamp(run.created_at)} · {run.rows_total} rows</small><p>{run.rows_matched} matched · {run.rows_unmatched} unmatched · {run.rows_exception} exceptions</p></div>
+            <div className="exception-actions"><Status value={run.status}/><button className="secondary-button" disabled={selectedReconciliationRunId === run.id} onClick={() => setSelectedReconciliationRunId(run.id)}>{selectedReconciliationRunId === run.id ? "Viewing" : "View rows"}</button></div>
+          </article>)}</div> : <Empty>No reconciliation runs yet. Import a provider statement to create the first run.</Empty>}
+          {selectedReconciliationRunId && <div className="reconciliation-records">
+            <div className="panel-heading"><div><h3>Statement rows</h3><p className="muted">The ledger is not changed by a statement match. Review exceptions separately.</p></div><span className="muted tiny">{reconciliationRecords.length} rows shown</span></div>
+            {reconciliationRecords.length ? <div className="exception-list">{reconciliationRecords.map((record) => <article className="exception" key={record.id}>
+              <div><strong>{label(record.reconciliation_status)}</strong><small>{record.provider_reference || "No provider reference"} · {record.merchant_reference || "No merchant reference"} · {stamp(record.occurred_at)}</small><p>{record.reason || (record.transaction_id ? `Matched transaction ${record.transaction_id}` : "No matching ledger transaction.")}</p></div>
+              <div className="exception-actions"><strong>{cash(Number(record.amount_minor),record.currency)}</strong></div>
+            </article>)}</div> : <Empty>This reconciliation run has no row records.</Empty>}
+          </div>}
+        </section>
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Exceptions</h2><p className="muted">A statement match alone never confirms a payment.</p></div></div>
+          {exceptions.length ? <div className="exception-list">{exceptions.map((item) => <article className="exception" key={item.id}>
+            <div><strong>{label(item.exception_type)}</strong><small>{item.provider} · {item.provider_reference || "No provider reference"} · {stamp(item.created_at)}</small><p>{String(item.details?.reason ?? item.details?.status ?? item.resolution_note ?? "Manual review required.")}</p></div>
+            <div className="exception-actions"><Status value={item.status}/>{!["resolved","dismissed"].includes(item.status) && <><input aria-label="Resolution note" placeholder="Resolution note" value={exceptionNote} onChange={(e) => setExceptionNote(e.target.value)}/><button className="secondary-button" disabled={busy} onClick={() => void resolveException(item,"resolved")}>Resolve</button><button className="secondary-button" disabled={busy} onClick={() => void resolveException(item,"dismissed")}>Dismiss</button></>}</div>
+          </article>)}</div> : <Empty>No reconciliation exceptions yet. Import a provider statement to begin.</Empty>}
+        </section>
+      </>}
       {tenantId && page === "Webhooks" && <><section className="panel form-panel"><div className="panel-heading"><div><h2>Register a webhook endpoint</h2><p className="muted">HTTPS destinations only. Delivery requires the named signing secret in server-side secrets and an active delivery worker. Do not assume delivery is running until operations confirms the worker is enabled.</p></div></div><form className="form-grid" onSubmit={addWebhook}><label className="full-field">HTTPS endpoint URL<input type="url" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} placeholder="https://merchant.example.com/webhooks/mobiwave" required/></label><label className="full-field">Signing secret environment variable<input value={webhookSecretRef} onChange={(e) => setWebhookSecretRef(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g,"_"))} required pattern="[A-Z][A-Z0-9_]{2,127}"/></label><div className="form-actions"><button className="primary-button" disabled={busy}>Register endpoint</button></div></form></section><section className="panel"><div className="panel-heading"><div><h2>Configured endpoints</h2><p className="muted">Secrets are never returned to the browser.</p></div></div>{webhooks.length ? webhooks.map((w) => <div className="list-row" key={w.id}><div><strong>{w.url}</strong><small>{(w.subscribed_events ?? []).join(", ")} · Added {stamp(w.created_at)}</small></div><Status value={w.enabled ? "enabled" : "disabled"}/>{w.enabled && <button className="secondary-button" onClick={() => void disableWebhook(w.id)} disabled={busy}>Disable</button>}</div>) : <Empty>No webhook endpoints registered.</Empty>}</section></>}
       {tenantId && page === "Developer API" && <section className="panel"><h2>API operations</h2><p className="muted">Requests use a short-lived Neon Auth JWT. Keep provider credentials and database URLs on the server.</p><div className="api-list">{[["GET","/api/v1/tenants","List your workspaces"],["GET","/api/v1/tenants/:tenantId/transactions","List payment transactions"],["POST","/api/v1/tenants/:tenantId/daraja/stk-push","Initiate a Daraja sandbox STK request"],["POST","/api/v1/tenants/:tenantId/pesapal/checkout","Create a Pesapal sandbox checkout"],["POST","/api/v1/tenants/:tenantId/paystack/checkout","Create a Paystack hosted checkout"],["POST","/api/v1/tenants/:tenantId/reconciliation/import","Import and reconcile a CSV statement"],["GET","/api/v1/tenants/:tenantId/exceptions","List reconciliation exceptions"],["POST","/api/v1/tenants/:tenantId/webhook-endpoints","Register a signed webhook endpoint"]].map(([method,path,desc]) => <div className="api-row" key={path}><code className={method === "GET" ? "method get" : "method post"}>{method}</code><code>{path}</code><span>{desc}</span></div>)}</div><div className="notice"><strong>Production status</strong><span>Live payments remain disabled. Sandbox authentication does not prove successful checkout, callbacks, settlement or regulatory readiness.</span></div></section>}
       <footer><span>MobiWave Payments · Kenya</span><span>PostgreSQL-backed · Tenant-scoped · Sandbox only</span></footer>

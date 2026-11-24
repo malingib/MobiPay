@@ -2,6 +2,24 @@ import { queryDarajaStk, queryPesapalStatus, verifyPaystackTransaction } from ".
 import { getTenantProviderCredentials } from "./providerConnections.js";
 import { issuePaymentWorkerCapability, newLeaseToken, withPaymentWorkerTransaction } from "./systemDb.js";
 
+/**
+ * Claim one recoverable provider event. Exported for focused SQL regression tests.
+ */
+export const providerEventRecoverySelectionSql = `
+  select e.id,e.tenant_id,e.provider,e.provider_event_id,e.payload,e.processing_attempts,
+    t.id as transaction_id,t.amount_minor,t.currency,t.status
+  from public.payment_provider_events e
+  left join public.payment_transactions t on t.tenant_id=e.tenant_id and
+    ((e.provider='daraja' and t.provider='daraja' and t.provider_checkout_request_id=e.provider_event_id) or
+     (e.provider='pesapal' and t.provider='pesapal' and t.provider_order_tracking_id=e.provider_event_id) or
+     (e.provider='paystack' and t.provider='paystack' and t.provider_payment_reference=e.provider_event_id))
+  where e.processing_status in ('retry','received')
+    and e.retry_at <= now()
+    and (e.lease_expires_at is null or e.lease_expires_at <= now())
+  order by e.received_at
+  limit 1 for update of e skip locked
+`;
+
 type RetryEvent = {
   id: string; tenant_id: string; provider: "daraja" | "pesapal" | "paystack"; provider_event_id: string;
   processing_attempts: number; payload: Record<string, any>; transaction_id: string | null; amount_minor: string | number | null;
@@ -39,19 +57,7 @@ export async function processRetryableProviderEvents(batchSize = 10): Promise<{ 
   for (let i=0; i<Math.max(1,Math.min(50,batchSize)); i++) {
     const leaseToken = newLeaseToken();
     const event = await withPaymentWorkerTransaction(workerCapability, async (client) => {
-      const selected = await client.query(
-        `select e.id,e.tenant_id,e.provider,e.provider_event_id,e.payload,e.processing_attempts,
-           t.id as transaction_id,t.amount_minor,t.currency,t.status
-         from public.payment_provider_events e
-         left join public.payment_transactions t on t.tenant_id=e.tenant_id and
-           ((e.provider='daraja' and t.provider='daraja' and t.provider_checkout_request_id=e.provider_event_id) or
-            (e.provider='pesapal' and t.provider='pesapal' and t.provider_order_tracking_id=e.provider_event_id) or\n            (e.provider='paystack' and t.provider='paystack' and t.provider_payment_reference=e.provider_event_id))
-         where e.processing_status in ('retry','received')
-           and e.retry_at <= now()
-           and (e.lease_expires_at is null or e.lease_expires_at <= now())
-         order by e.received_at
-         limit 1 for update of e skip locked`,
-      );
+      const selected = await client.query(providerEventRecoverySelectionSql);
       const row = selected.rows[0];
       if (!row) return undefined;
       await client.query(

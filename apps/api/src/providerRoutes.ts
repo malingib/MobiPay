@@ -188,7 +188,7 @@ router.post("/tenants/:tenantId/paystack/checkout", requireAuth, async (req,res,
     const transactionId=inserted.rows[0]?.id as string | undefined;
     if (!transactionId) {
       const raced=await withUserTransaction(req.merchantDbCapability!,async(client)=>client.query(
-        "select id,provider,merchant_reference,amount_minor,description,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
+        "select id,provider,merchant_reference,amount_minor,currency,description,payer_email,provider_payment_reference,provider_checkout_url,status from public.payment_transactions where tenant_id=$1 and idempotency_key=$2",
         [tenantId,idempotencyKey],
       ));
       const row=raced.rows[0];

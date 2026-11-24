@@ -249,6 +249,12 @@ begin
 end;
 $grants$;
 
-grant mobipay_runtime to current_user with admin option;
+do $membership$
+begin
+  if not pg_has_role(current_user,'mobipay_runtime','member') then
+    execute format('grant mobipay_runtime to %I with admin option',current_user);
+  end if;
+end;
+$membership$;
 alter default privileges in schema public
   grant select,insert,update on tables to mobipay_runtime;

@@ -266,6 +266,34 @@ router.post("/tenants/:tenantId/transactions", async (req, res, next) => {
   } catch (error) { return next(error); }
 });
 
+router.get("/tenants/:tenantId/reconciliation/runs", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? "");
+  if (!validTenantParam(tenantId)) return res.status(400).json({error:"invalid_tenant_id"});
+  try {
+    if (!await membership(req.merchantDbCapability!,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const requested=Number(req.query.limit ?? 50);
+    const limit=Number.isFinite(requested) ? Math.max(1,Math.min(100,Math.trunc(requested))) : 50;
+    const result=await withUserTransaction(req.merchantDbCapability!,client=>client.query(
+      "select id,provider,source_name,status,rows_total,rows_matched,rows_unmatched,rows_exception,created_at,completed_at from public.payment_reconciliation_runs where tenant_id=$1 order by created_at desc limit $2",
+      [tenantId,limit],
+    ));
+    return res.json({runs:result.rows});
+  } catch(error) { return next(error); }
+});
+
+router.get("/tenants/:tenantId/reconciliation/runs/:runId/records", async (req,res,next) => {
+  const tenantId=String(req.params.tenantId ?? ""), runId=String(req.params.runId ?? "");
+  if (!validTenantParam(tenantId) || !validTenantParam(runId)) return res.status(400).json({error:"invalid_id"});
+  try {
+    if (!await membership(req.merchantDbCapability!,tenantId)) return res.status(404).json({error:"tenant_not_found"});
+    const result=await withUserTransaction(req.merchantDbCapability!,client=>client.query(
+      "select id,provider,provider_reference,merchant_reference,amount_minor,currency,occurred_at,reconciliation_status,transaction_id,reason,created_at from public.payment_reconciliation_records where tenant_id=$1 and run_id=$2 order by created_at asc limit 1000",
+      [tenantId,runId],
+    ));
+    return res.json({records:result.rows});
+  } catch(error) { return next(error); }
+});
+
 router.get("/tenants/:tenantId/exceptions", async (req, res, next) => {
   const tenantId = req.params.tenantId!;
   if (!validTenantParam(tenantId)) return res.status(400).json({ error: "invalid_tenant_id" });

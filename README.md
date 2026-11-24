@@ -35,7 +35,7 @@ See `.env.example` and [the payment operations runbook](docs/payment-operations-
 
 ## Migration and operational requirements
 
-Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, `neon/migrations/003_merchant_provider_security.sql`, `neon/migrations/004_platform_admin_audit.sql`, and `neon/migrations/005_worker_leases.sql` in order to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
+Apply `neon/migrations/001_payment_foundation.sql`, `neon/migrations/002_payment_safety_and_operations.sql`, `neon/migrations/003_merchant_provider_security.sql`, `neon/migrations/004_platform_admin_audit.sql`, `neon/migrations/005_worker_leases.sql`, and `neon/migrations/006_tenant_bootstrap_returning.sql` in order to a dedicated database before deploying this branch. The API does not apply migrations automatically. Keep `MERCHANT_WEBHOOK_WORKER_ENABLED=false` until migration 002 and endpoint secret configuration are complete. Apply migration 004 before using platform-admin merchant status actions.
 
 ## Deployment configuration
 
@@ -51,7 +51,7 @@ The web console uses Neon Auth (Managed Better Auth) for merchant registration a
 - API variables: `AUTH_ISSUER` (the exact issuer value emitted in Neon Auth JWTs), `AUTH_JWKS_URL` (the branch JWKS URL), and optionally `AUTH_AUDIENCE` only if the configured token includes an audience that should be enforced.
 - Set custom SMTP and verify email before production; do not rely on shared development email delivery for launch.
 
-The sign-up screen creates a Neon Auth user; the authenticated user can then create a merchant workspace. Workspace creation makes that user its owner. API requests send a short-lived Neon Auth JWT in the Authorization header. The API validates the signature using the configured JWKS and validates issuer before processing requests.
+The sign-up screen creates a Neon Auth user; the authenticated user can then create a merchant workspace. Workspace creation makes that user its owner. Migration 006 grants a narrowly scoped SELECT policy during the server-only tenant bootstrap transaction because PostgreSQL applies SELECT RLS to `INSERT ... RETURNING`. API requests send a short-lived Neon Auth JWT in the Authorization header. The API validates the signature using the configured JWKS and validates issuer before processing requests.
 
 ## Merchant onboarding and provider connections
 

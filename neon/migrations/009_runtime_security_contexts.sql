@@ -210,11 +210,22 @@ create policy payment_transaction_update on public.payment_transactions
 -- A dedicated NOLOGIN role is assumed by API transactions. It never owns tables,
 -- has no DELETE privilege, and cannot bypass row-level security.
 do $role$
+declare
+  runtime_role record;
 begin
-  if not exists (select 1 from pg_roles where rolname='mobipay_runtime') then
+  select rolsuper,rolbypassrls,rolcanlogin,rolcreatedb,rolcreaterole,rolinherit
+    into runtime_role
+    from pg_roles where rolname='mobipay_runtime';
+
+  if not found then
     create role mobipay_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
-  else
-    alter role mobipay_runtime nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  elsif runtime_role.rolsuper
+     or runtime_role.rolbypassrls
+     or runtime_role.rolcanlogin
+     or runtime_role.rolcreatedb
+     or runtime_role.rolcreaterole
+     or runtime_role.rolinherit then
+    raise exception 'Existing mobipay_runtime role is not least-privilege; remediate role attributes with a database administrator';
   end if;
 end;
 $role$;

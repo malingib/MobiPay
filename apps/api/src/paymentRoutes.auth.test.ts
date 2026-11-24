@@ -16,6 +16,8 @@ test("merchant payment routes reject unauthenticated tenant and reconciliation r
       ["/api/v1/tenants"],
       ["/api/v1/tenants", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Test merchant", slug: "test-merchant" }) }],
       ["/api/v1/tenants/00000000-0000-4000-8000-000000000001/reconciliation/runs"],
+      ["/api/v1/tenants/00000000-0000-4000-8000-000000000001/provider-connections"],
+      ["/api/v1/tenants/00000000-0000-4000-8000-000000000001/daraja/stk-push", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }],
     ];
     for (const [path, init] of requests) {
       const response = await fetch(base + path, init);
